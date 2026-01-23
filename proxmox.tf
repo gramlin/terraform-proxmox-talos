@@ -1,3 +1,8 @@
+# see https://developer.hashicorp.com/terraform/language/functions/format
+locals {
+  vm_name_prefix = var.prefix != "" ? "${var.prefix}-" : ""
+}
+
 # see https://registry.terraform.io/providers/bpg/proxmox/0.93.0/docs/resources/virtual_environment_file
 resource "proxmox_virtual_environment_file" "talos" {
   datastore_id = "local"
@@ -12,7 +17,7 @@ resource "proxmox_virtual_environment_file" "talos" {
 # see https://registry.terraform.io/providers/bpg/proxmox/0.93.0/docs/resources/virtual_environment_vm
 resource "proxmox_virtual_environment_vm" "controller" {
   count           = var.controller_count
-  name            = "${var.prefix}-${local.controller_nodes[count.index].name}"
+  name            = "${local.vm_name_prefix}${local.controller_nodes[count.index].name}"
   node_name       = var.proxmox_pve_node_name
   tags            = sort(["talos", "controller", "example", "terraform"])
   stop_on_destroy = true
@@ -24,32 +29,32 @@ resource "proxmox_virtual_environment_vm" "controller" {
   }
   cpu {
     type  = "host"
-    cores = 4
+    cores = 2
   }
   memory {
-    dedicated = 4 * 1024
+    dedicated = 6 * 1024
   }
   vga {
     type = "qxl"
   }
   network_device {
-    bridge = "vmbr0"
+    bridge = var.proxmox_bridge
   }
   tpm_state {
     version = "v2.0"
   }
   efi_disk {
-    datastore_id = "local-lvm"
+    datastore_id = var.proxmox_storage
     file_format  = "raw"
     type         = "4m"
   }
   disk {
-    datastore_id = "local-lvm"
+    datastore_id = var.proxmox_storage
     interface    = "scsi0"
     iothread     = true
     ssd          = true
     discard      = "on"
-    size         = 40
+    size         = 80
     file_format  = "raw"
     file_id      = proxmox_virtual_environment_file.talos.id
   }
@@ -70,7 +75,7 @@ resource "proxmox_virtual_environment_vm" "controller" {
 # see https://registry.terraform.io/providers/bpg/proxmox/0.93.0/docs/resources/virtual_environment_vm
 resource "proxmox_virtual_environment_vm" "worker" {
   count           = var.worker_count
-  name            = "${var.prefix}-${local.worker_nodes[count.index].name}"
+  name            = "${local.vm_name_prefix}${local.worker_nodes[count.index].name}"
   node_name       = var.proxmox_pve_node_name
   tags            = sort(["talos", "worker", "example", "terraform"])
   stop_on_destroy = true
@@ -85,40 +90,31 @@ resource "proxmox_virtual_environment_vm" "worker" {
     cores = 4
   }
   memory {
-    dedicated = 4 * 1024
+    dedicated = 16 * 1024
   }
   vga {
     type = "qxl"
   }
   network_device {
-    bridge = "vmbr0"
+    bridge = var.proxmox_bridge
   }
   tpm_state {
     version = "v2.0"
   }
   efi_disk {
-    datastore_id = "local-lvm"
+    datastore_id = var.proxmox_storage
     file_format  = "raw"
     type         = "4m"
   }
   disk {
-    datastore_id = "local-lvm"
+    datastore_id = var.proxmox_storage
     interface    = "scsi0"
     iothread     = true
     ssd          = true
     discard      = "on"
-    size         = 40
+    size         = 80
     file_format  = "raw"
     file_id      = proxmox_virtual_environment_file.talos.id
-  }
-  disk {
-    datastore_id = "local-lvm"
-    interface    = "scsi1"
-    iothread     = true
-    ssd          = true
-    discard      = "on"
-    size         = 60
-    file_format  = "raw"
   }
   agent {
     enabled = true

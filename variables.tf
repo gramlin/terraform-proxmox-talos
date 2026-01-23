@@ -7,6 +7,16 @@ variable "proxmox_pve_node_address" {
   type = string
 }
 
+variable "proxmox_storage" {
+  type    = string
+  default = "local-lvm"
+}
+
+variable "proxmox_bridge" {
+  type    = string
+  default = "vmbr0"
+}
+
 # see https://github.com/siderolabs/talos/releases
 # see https://docs.siderolabs.com/talos/v1.12/getting-started/support-matrix
 variable "talos_version" {
