@@ -14,7 +14,7 @@ variable "proxmox_storage" {
 
 variable "proxmox_bridge" {
   type    = string
-  default = "vmbr0"
+  default = "vmbr1"
 }
 
 # see https://github.com/siderolabs/talos/releases
@@ -80,13 +80,13 @@ variable "cluster_node_network_link" {
 variable "cluster_node_network_first_controller_hostnum" {
   description = "The hostnum of the first controller host"
   type        = number
-  default     = 80
+  default     = 31
 }
 
 variable "cluster_node_network_first_worker_hostnum" {
   description = "The hostnum of the first worker host"
   type        = number
-  default     = 90
+  default     = 33
 }
 
 variable "cluster_node_network_load_balancer_first_hostnum" {
@@ -101,6 +101,12 @@ variable "cluster_node_network_load_balancer_last_hostnum" {
   default     = 230
 }
 
+variable "cluster_node_network_nameservers" {
+  description = "DNS servers for the Talos nodes"
+  type        = list(string)
+  default     = ["192.168.190.254", "1.1.1.1"]
+}
+
 variable "ingress_domain" {
   description = "the DNS domain of the ingress resources"
   type        = string
@@ -109,7 +115,7 @@ variable "ingress_domain" {
 
 variable "controller_count" {
   type    = number
-  default = 1
+  default = 2
   validation {
     condition     = var.controller_count >= 1
     error_message = "Must be 1 or more."
@@ -118,7 +124,7 @@ variable "controller_count" {
 
 variable "worker_count" {
   type    = number
-  default = 1
+  default = 4
   validation {
     condition     = var.worker_count >= 1
     error_message = "Must be 1 or more."
