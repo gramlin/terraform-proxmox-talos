@@ -50,13 +50,13 @@ variable "cluster_name" {
 variable "cluster_vip" {
   description = "The virtual IP (VIP) address of the Kubernetes API server. Ensure it is synchronized with the 'cluster_endpoint' variable."
   type        = string
-  default     = "192.168.190.79"
+  default     = "192.168.190.30"
 }
 
 variable "cluster_endpoint" {
   description = "The virtual IP (VIP) endpoint of the Kubernetes API server. Ensure it is synchronized with the 'cluster_vip' variable."
   type        = string
-  default     = "https://192.168.190.79:6443"
+  default     = "https://192.168.190.30:6443"
 }
 
 variable "cluster_node_network_gateway" {
