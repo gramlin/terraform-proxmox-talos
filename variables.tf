@@ -50,25 +50,31 @@ variable "cluster_name" {
 variable "cluster_vip" {
   description = "The virtual IP (VIP) address of the Kubernetes API server. Ensure it is synchronized with the 'cluster_endpoint' variable."
   type        = string
-  default     = "192.168.8.79"
+  default     = "192.168.190.79"
 }
 
 variable "cluster_endpoint" {
   description = "The virtual IP (VIP) endpoint of the Kubernetes API server. Ensure it is synchronized with the 'cluster_vip' variable."
   type        = string
-  default     = "https://192.168.8.79:6443"
+  default     = "https://192.168.190.79:6443"
 }
 
 variable "cluster_node_network_gateway" {
   description = "The IP network gateway of the cluster nodes"
   type        = string
-  default     = "192.168.8.1"
+  default     = "192.168.190.254"
 }
 
 variable "cluster_node_network" {
   description = "The IP network of the cluster nodes"
   type        = string
-  default     = "192.168.8.0/24"
+  default     = "192.168.190.0/24"
+}
+
+variable "cluster_node_network_link" {
+  description = "The network interface name used by the Talos nodes"
+  type        = string
+  default     = "ens18"
 }
 
 variable "cluster_node_network_first_controller_hostnum" {

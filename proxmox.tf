@@ -1,6 +1,7 @@
 # see https://developer.hashicorp.com/terraform/language/functions/format
 locals {
-  vm_name_prefix = var.prefix != "" ? "${var.prefix}-" : ""
+  vm_name_prefix              = var.prefix != "" ? "${var.prefix}-" : ""
+  cluster_node_network_prefix = split("/", var.cluster_node_network)[1]
 }
 
 # see https://registry.terraform.io/providers/bpg/proxmox/0.93.0/docs/resources/virtual_environment_file
@@ -65,7 +66,7 @@ resource "proxmox_virtual_environment_vm" "controller" {
   initialization {
     ip_config {
       ipv4 {
-        address = "${local.controller_nodes[count.index].address}/24"
+        address = "${local.controller_nodes[count.index].address}/${local.cluster_node_network_prefix}"
         gateway = var.cluster_node_network_gateway
       }
     }
@@ -123,7 +124,7 @@ resource "proxmox_virtual_environment_vm" "worker" {
   initialization {
     ip_config {
       ipv4 {
-        address = "${local.worker_nodes[count.index].address}/24"
+        address = "${local.worker_nodes[count.index].address}/${local.cluster_node_network_prefix}"
         gateway = var.cluster_node_network_gateway
       }
     }

@@ -107,7 +107,7 @@ data "talos_machine_configuration" "controller" {
       yamlencode({
         apiVersion = "v1alpha1"
         kind       = "Layer2VIPConfig"
-        link       = "eth0"
+        link       = var.cluster_node_network_link
         name       = var.cluster_vip
       }),
       yamlencode({
