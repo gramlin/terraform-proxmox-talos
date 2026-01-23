@@ -221,6 +221,25 @@ resource "talos_machine_configuration_apply" "controller" {
       auto       = "off"
       hostname   = local.controller_nodes[count.index].name
     }),
+    yamlencode({
+      machine = {
+        network = {
+          interfaces = [
+            {
+              interface = var.cluster_node_network_link
+              addresses = ["${local.controller_nodes[count.index].address}/24"]
+              routes = [
+                {
+                  network = "0.0.0.0/0"
+                  gateway = var.cluster_node_network_gateway
+                }
+              ]
+            }
+          ]
+          nameservers = var.cluster_node_network_nameservers
+        }
+      }
+    }),
   ]
   depends_on = [
     proxmox_virtual_environment_vm.controller,
@@ -241,6 +260,25 @@ resource "talos_machine_configuration_apply" "worker" {
       kind       = "HostnameConfig"
       auto       = "off"
       hostname   = local.worker_nodes[count.index].name
+    }),
+    yamlencode({
+      machine = {
+        network = {
+          interfaces = [
+            {
+              interface = var.cluster_node_network_link
+              addresses = ["${local.worker_nodes[count.index].address}/24"]
+              routes = [
+                {
+                  network = "0.0.0.0/0"
+                  gateway = var.cluster_node_network_gateway
+                }
+              ]
+            }
+          ]
+          nameservers = var.cluster_node_network_nameservers
+        }
+      }
     }),
   ]
   depends_on = [
