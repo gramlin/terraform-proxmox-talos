@@ -74,7 +74,7 @@ variable "cluster_node_network" {
 variable "cluster_node_network_link" {
   description = "The network interface name used by the Talos nodes"
   type        = string
-  default     = "ens18"
+  default     = "eth0"
 }
 
 variable "cluster_node_network_first_controller_hostnum" {

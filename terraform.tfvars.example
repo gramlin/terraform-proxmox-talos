@@ -9,7 +9,7 @@ cluster_endpoint = "https://192.168.190.30:6443"
 
 cluster_node_network_gateway = "192.168.190.254"
 cluster_node_network         = "192.168.190.0/24"
-cluster_node_network_link    = "ens18"
+cluster_node_network_link    = "eth0"
 cluster_node_network_nameservers = ["192.168.190.254", "1.1.1.1"]
 
 controller_count = 2
