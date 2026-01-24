@@ -12,16 +12,36 @@ The [spin extension](https://github.com/siderolabs/extensions/tree/main/containe
 
 # Usage (Ubuntu 24.04 host)
 
+# Preinstall
+a) /etc/ssh/sshd_config.d
+50-cloud-init.conf sätt PasswordAuthentication yes
+# Så kan man logga in via ssh
+
+b) apt install net-tools 
+# och gör sen en ifconfig
+
+c) sudo apt update
+sudo apt install -y \
+  ca-certificates \
+  curl \
+  gnupg \
+  lsb-release
+curl -fsSL https://get.docker.com | sudo sh
+sudo usermod -aG docker $USER
+newgrp docker
+docker run --rm hello-world
+
+
 Install terraform:
 
 ```bash
 # see https://github.com/hashicorp/terraform/releases
 # renovate: datasource=github-releases depName=hashicorp/terraform
-terraform_version='1.14.3'
-wget "https://releases.hashicorp.com/terraform/$terraform_version/terraform_${$terraform_version}_linux_amd64.zip"
-unzip "terraform_${$terraform_version}_linux_amd64.zip"
-sudo install terraform /usr/local/bin
-rm terraform terraform_*_linux_amd64.zip
+  terraform_version='1.14.3'
+  wget "https://releases.hashicorp.com/terraform/$terraform_version/terraform_${$terraform_version}_linux_amd64.zip"
+  unzip "terraform_${$terraform_version}_linux_amd64.zip"
+  sudo install terraform /usr/local/bin
+  rm terraform terraform_*_linux_amd64.zip
 ```
 
 Install cilium cli:
