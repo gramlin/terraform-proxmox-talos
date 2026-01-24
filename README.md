@@ -96,6 +96,17 @@ EOF
 source secrets-proxmox.sh
 ```
 
+## Proxmox permissions
+
+If `terraform apply` fails with `HTTP 403` / `Permission check failed`, the
+Proxmox user or API token is missing privileges to upload the Talos image or
+create VMs. Ensure the account has an appropriate role assigned on the target
+node and datastore (e.g., a role that grants VM create/configure privileges plus
+datastore allocation/audit privileges for the ISO and disks). For example, a
+minimal role typically includes VM allocation/configuration/power management
+privileges and datastore allocation/audit privileges on the `local` and target
+VM storage. Adjust to match your Proxmox permission model.
+
 Build the talos image, and initialize terraform:
 
 ```bash
