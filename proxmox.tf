@@ -117,6 +117,16 @@ resource "proxmox_virtual_environment_vm" "worker" {
     file_format  = "raw"
     file_id      = proxmox_virtual_environment_file.talos.id
   }
+  disk {
+  datastore_id = var.proxmox_storage
+  interface    = "scsi1"
+  iothread     = true
+  ssd          = true
+  discard      = "on"
+  size         = 100
+  file_format  = "raw"
+}
+
   agent {
     enabled = true
     trim    = true
