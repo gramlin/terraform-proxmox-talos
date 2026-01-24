@@ -133,5 +133,5 @@ variable "worker_count" {
 
 variable "prefix" {
   type    = string
-  default = "talos-example"
+  default = "cure"
 }

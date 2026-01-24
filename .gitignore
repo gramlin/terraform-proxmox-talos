@@ -13,3 +13,4 @@ kubeconfig.yml
 kubernetes-ingress-ca-crt.pem
 tmp/
 secret*
+secrets-proxmox.tf
