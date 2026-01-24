@@ -44,7 +44,7 @@ variable "kubernetes_version" {
 variable "cluster_name" {
   description = "A name to provide for the Talos cluster"
   type        = string
-  default     = "example"
+  default     = "cure"
 }
 
 variable "cluster_vip" {
@@ -110,7 +110,7 @@ variable "cluster_node_network_nameservers" {
 variable "ingress_domain" {
   description = "the DNS domain of the ingress resources"
   type        = string
-  default     = "example.test"
+  default     = "cure.dev"
 }
 
 variable "controller_count" {

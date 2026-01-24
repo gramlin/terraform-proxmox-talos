@@ -100,7 +100,7 @@ data "helm_template" "cilium" {
     },
     {
       name  = "devices"
-      value = "{eth0}"
+      value = "{ens18}"
     },
     {
       name  = "ingressController.enabled"
