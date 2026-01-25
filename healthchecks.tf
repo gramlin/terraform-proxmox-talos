@@ -84,7 +84,7 @@ resource "null_resource" "cluster_health_checks" {
 
       if command -v talosctl >/dev/null 2>&1; then
         echo "🟢 Talos: talosctl health"
-        talosctl --talosconfig "$talos_config" --endpoints "$primary_controller" health --wait-timeout 20m --nodes "$all_nodes_csv" --control-plane-nodes "$controllers_csv" --worker-nodes "$workers_csv"
+        talosctl --talosconfig "$talos_config" --endpoints "$primary_controller" health --wait-timeout 20m --nodes "$primary_controller" --control-plane-nodes "$controllers_csv" --worker-nodes "$workers_csv"
         echo "🟢 Talos: medlemmar"
         talosctl --talosconfig "$talos_config" --endpoints "$primary_controller" get members --nodes "$controllers_csv"
       else
