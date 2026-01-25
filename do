@@ -20,6 +20,7 @@ export CHECKPOINT_DISABLE='1'
 
 export TALOSCONFIG="$PWD/talosconfig.yml"
 export KUBECONFIG="$PWD/kubeconfig.yml"
+export KUBECTL_PAGER=cat
 
 log_file="${DO_LOG_FILE:-$PWD/do.log}"
 mkdir -p "$(dirname "$log_file")"
@@ -313,15 +314,15 @@ EOF
   fi
 
   if ! kubectl linstor version >/dev/null 2>&1; then
-    if kubectl krew list 2>/dev/null | awk '{print $1}' | grep -qx "linstor"; then
-      local krew_root
-      krew_root="$(kubectl krew root 2>/dev/null || true)"
-      if [ -z "$krew_root" ]; then
-        krew_root="$(kubectl krew env KREW_ROOT 2>/dev/null | awk -F= '{print $2}' | tr -d '"')"
-      fi
-      if [ -z "$krew_root" ]; then
-        krew_root="${KREW_ROOT:-$HOME/.krew}"
-      fi
+    local krew_root
+    krew_root="$(kubectl krew root 2>/dev/null || true)"
+    if [ -z "$krew_root" ]; then
+      krew_root="$(kubectl krew env KREW_ROOT 2>/dev/null | awk -F= '{print $2}' | tr -d '"')"
+    fi
+    if [ -z "$krew_root" ]; then
+      krew_root="${KREW_ROOT:-$HOME/.krew}"
+    fi
+    if [ -n "$krew_root" ] && [ -x "$krew_root/bin/kubectl-linstor" ]; then
       die "kubectl linstor plugin installed via krew but not found in PATH. Add: export PATH=\"${krew_root}/bin:\$PATH\""
     fi
     die "kubectl linstor plugin not installed. Install via: kubectl krew install linstor"
