@@ -1,14 +1,32 @@
+resource "local_sensitive_file" "healthchecks_talosconfig" {
+  content              = data.talos_client_configuration.talos.talos_config
+  filename             = "${path.module}/tmp/healthchecks/talosconfig"
+  directory_permission = "0700"
+  file_permission      = "0600"
+}
+
+resource "local_sensitive_file" "healthchecks_kubeconfig" {
+  content              = talos_cluster_kubeconfig.talos.kubeconfig_raw
+  filename             = "${path.module}/tmp/healthchecks/kubeconfig"
+  directory_permission = "0700"
+  file_permission      = "0600"
+}
+
 resource "null_resource" "cluster_health_checks" {
   depends_on = [
+    local_sensitive_file.healthchecks_talosconfig,
+    local_sensitive_file.healthchecks_kubeconfig,
     talos_cluster_kubeconfig.talos,
     talos_machine_bootstrap.talos,
   ]
 
   triggers = {
-    controllers        = join(",", [for node in local.controller_nodes : node.address])
-    workers            = join(",", [for node in local.worker_nodes : node.address])
-    talos_version      = var.talos_version
-    kubernetes_version = var.kubernetes_version
+    controllers           = join(",", [for node in local.controller_nodes : node.address])
+    workers               = join(",", [for node in local.worker_nodes : node.address])
+    talos_version         = var.talos_version
+    kubernetes_version    = var.kubernetes_version
+    talos_config_checksum = local_sensitive_file.healthchecks_talosconfig.content_sha256
+    kubeconfig_checksum   = local_sensitive_file.healthchecks_kubeconfig.content_sha256
   }
 
   provisioner "local-exec" {
@@ -22,8 +40,8 @@ resource "null_resource" "cluster_health_checks" {
       mkdir -p "$work_dir"
       umask 077
 
-      talos_config="$work_dir/talosconfig"
-      kube_config="$work_dir/kubeconfig"
+      talos_config="${local_sensitive_file.healthchecks_talosconfig.filename}"
+      kube_config="${local_sensitive_file.healthchecks_kubeconfig.filename}"
       controllers_csv="${join(",", [for node in local.controller_nodes : node.address])}"
       workers_csv="${join(",", [for node in local.worker_nodes : node.address])}"
       all_nodes_csv="${join(",", concat(
@@ -31,14 +49,6 @@ resource "null_resource" "cluster_health_checks" {
         [for node in local.worker_nodes : node.address],
       ))}"
       primary_controller="${local.controller_nodes[0].address}"
-
-      cat > "$talos_config" <<'TALOSCONFIG'
-${nonsensitive(data.talos_client_configuration.talos.talos_config)}
-TALOSCONFIG
-
-      cat > "$kube_config" <<'KUBECONFIG'
-${nonsensitive(talos_cluster_kubeconfig.talos.kubeconfig_raw)}
-KUBECONFIG
 
       echo "⏳ Blinkenlicht: väntesida (visar status medan noderna konfigureras)..."
       wait_deadline=$((SECONDS + 1200))
