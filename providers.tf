@@ -38,6 +38,10 @@ terraform {
       source  = "rgl/kustomizer"
       version = "0.0.3"
     }
+    null = {
+      source  = "hashicorp/null"
+      version = "3.2.4"
+    }
   }
 }
 

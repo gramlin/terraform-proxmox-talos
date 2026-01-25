@@ -47,6 +47,12 @@ variable "cluster_name" {
   default     = "cure"
 }
 
+variable "cluster_prefix" {
+  description = "Prefix for cluster-wide resources (falls back to prefix if left empty)"
+  type        = string
+  default     = ""
+}
+
 variable "cluster_vip" {
   description = "The virtual IP (VIP) address of the Kubernetes API server. Ensure it is synchronized with the 'cluster_endpoint' variable."
   type        = string
@@ -134,4 +140,58 @@ variable "worker_count" {
 variable "prefix" {
   type    = string
   default = "cure"
+}
+
+variable "controlplane_node_prefix" {
+  description = "Hostname prefix for controlplane nodes"
+  type        = string
+  default     = "erwecp"
+}
+
+variable "worker_node_prefix" {
+  description = "Hostname prefix for worker nodes"
+  type        = string
+  default     = "erwewk"
+}
+
+variable "controller_cpu_cores" {
+  description = "Number of CPU cores for controlplane nodes"
+  type        = number
+  default     = 2
+}
+
+variable "controller_memory_mb" {
+  description = "Memory (MB) for controlplane nodes"
+  type        = number
+  default     = 6 * 1024
+}
+
+variable "controller_os_disk_size_gb" {
+  description = "OS disk size (GB) for controlplane nodes"
+  type        = number
+  default     = 80
+}
+
+variable "worker_cpu_cores" {
+  description = "Number of CPU cores for worker nodes"
+  type        = number
+  default     = 4
+}
+
+variable "worker_memory_mb" {
+  description = "Memory (MB) for worker nodes"
+  type        = number
+  default     = 16 * 1024
+}
+
+variable "worker_os_disk_size_gb" {
+  description = "OS disk size (GB) for worker nodes"
+  type        = number
+  default     = 80
+}
+
+variable "worker_data_disk_size_gb" {
+  description = "Data disk size (GB) for worker nodes"
+  type        = number
+  default     = 80
 }

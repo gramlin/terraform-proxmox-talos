@@ -1,6 +1,8 @@
 # see https://developer.hashicorp.com/terraform/language/functions/format
 locals {
-  vm_name_prefix              = var.prefix != "" ? "${var.prefix}-" : ""
+  cluster_prefix              = var.cluster_prefix != "" ? var.cluster_prefix : var.prefix
+  vm_name_prefix              = local.cluster_prefix != "" ? "${local.cluster_prefix}-" : ""
+  cluster_tag                 = local.cluster_prefix != "" ? local.cluster_prefix : var.cluster_name
   cluster_node_network_prefix = split("/", var.cluster_node_network)[1]
 }
 
@@ -23,7 +25,7 @@ resource "proxmox_virtual_environment_vm" "controller" {
   count           = var.controller_count
   name            = "${local.vm_name_prefix}${local.controller_nodes[count.index].name}"
   node_name       = var.proxmox_pve_node_name
-  tags            = sort(["talos", "controller", "cure", "terraform"])
+  tags            = sort(["talos", "controller", local.cluster_tag, "terraform"])
   stop_on_destroy = true
 
   bios          = "ovmf"
@@ -34,10 +36,10 @@ resource "proxmox_virtual_environment_vm" "controller" {
 
   cpu {
     type  = "host"
-    cores = 2
+    cores = var.controller_cpu_cores
   }
 
-  memory { dedicated = 6 * 1024 }
+  memory { dedicated = var.controller_memory_mb }
 
   vga { type = "qxl" }
 
@@ -60,7 +62,7 @@ resource "proxmox_virtual_environment_vm" "controller" {
     iothread     = true
     ssd          = true
     discard      = "on"
-    size         = 80
+    size         = var.controller_os_disk_size_gb
     file_format  = "raw"
     file_id      = proxmox_virtual_environment_file.talos.id
   }
@@ -86,7 +88,7 @@ resource "proxmox_virtual_environment_vm" "worker" {
   count           = var.worker_count
   name            = "${local.vm_name_prefix}${local.worker_nodes[count.index].name}"
   node_name       = var.proxmox_pve_node_name
-  tags            = sort(["talos", "worker", "cure", "terraform"])
+  tags            = sort(["talos", "worker", local.cluster_tag, "terraform"])
   stop_on_destroy = true
 
   bios          = "ovmf"
@@ -97,10 +99,10 @@ resource "proxmox_virtual_environment_vm" "worker" {
 
   cpu {
     type  = "host"
-    cores = 4
+    cores = var.worker_cpu_cores
   }
 
-  memory { dedicated = 16 * 1024 }
+  memory { dedicated = var.worker_memory_mb }
 
   vga { type = "qxl" }
 
@@ -123,7 +125,7 @@ resource "proxmox_virtual_environment_vm" "worker" {
     iothread     = true
     ssd          = true
     discard      = "on"
-    size         = 80
+    size         = var.worker_os_disk_size_gb
     file_format  = "raw"
     file_id      = proxmox_virtual_environment_file.talos.id
   }
@@ -136,7 +138,7 @@ resource "proxmox_virtual_environment_vm" "worker" {
     iothread     = true
     ssd          = true
     discard      = "on"
-    size         = 80
+    size         = var.worker_data_disk_size_gb
     file_format  = "raw"
   }
 
