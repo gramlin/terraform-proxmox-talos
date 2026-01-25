@@ -1,3 +1,4 @@
+# Taloskontrollen
 locals {
   controller_nodes = [
     for i in range(var.controller_count) : {
