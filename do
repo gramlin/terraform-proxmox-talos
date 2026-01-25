@@ -178,6 +178,21 @@ function piraeus-install {
   step "piraeus wait operator"
   kubectl wait pod --timeout=15m --for=condition=Ready -n piraeus-datastore -l app.kubernetes.io/component=piraeus-operator
 
+  step "piraeus relax webhook failure policy"
+  local webhook_count
+  webhook_count="$(
+    kubectl get validatingwebhookconfiguration piraeus-operator-validating-webhook-configuration \
+      -o jsonpath='{.webhooks[*].name}' \
+      | wc -w
+  )"
+  if [ "$webhook_count" -gt 0 ]; then
+    for i in $(seq 0 $((webhook_count - 1))); do
+      kubectl patch validatingwebhookconfiguration piraeus-operator-validating-webhook-configuration \
+        --type=json \
+        --patch="[{\"op\":\"replace\",\"path\":\"/webhooks/$i/failurePolicy\",\"value\":\"Ignore\"}]"
+    done
+  fi
+
   step "piraeus configure"
   kubectl apply -n piraeus-datastore -f - <<'EOF'
 apiVersion: piraeus.io/v1
