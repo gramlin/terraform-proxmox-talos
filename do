@@ -1,6 +1,11 @@
 #!/bin/bash
 set -euo pipefail
 
+# Enable extra shell tracing with DO_DEBUG=1
+if [ "${DO_DEBUG:-}" = "1" ]; then
+  set -x
+fi
+
 # renovate: datasource=github-releases depName=siderolabs/talos
 talos_version="1.12.1"
 
@@ -25,6 +30,7 @@ echo "Logging to $log_file"
 # --- preflight ---------------------------------------------------------------
 
 die() { echo "ERROR: $*" >&2; exit 1; }
+warn() { echo "WARN: $*" >&2; }
 
 # Auto-load secrets if present
 if [ -f ./secrets-proxmox.sh ]; then
@@ -264,6 +270,14 @@ EOF
     kubectl get linstorclusters.piraeus.io linstor -o yaml || true
     kubectl -n piraeus-datastore get pods -o wide || true
     kubectl -n piraeus-datastore get events --sort-by=.lastTimestamp | tail -n 50 || true
+    if [ "${DO_DEBUG:-}" = "1" ]; then
+      warn "DO_DEBUG=1 set, dumping extra diagnostics."
+      kubectl -n piraeus-datastore get all -o wide || true
+      kubectl -n piraeus-datastore describe linstorclusters.piraeus.io linstor || true
+      kubectl -n piraeus-datastore describe pods || true
+      kubectl -n piraeus-datastore logs deployment/piraeus-operator-controller-manager --all-containers --tail=200 || true
+      kubectl -n piraeus-datastore logs deployment/piraeus-operator-gencert --all-containers --tail=200 || true
+    fi
     die "LinstorCluster/linstor not available. See diagnostics above."
   fi
 
