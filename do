@@ -239,16 +239,34 @@ EOF
   kubectl wait pod --timeout=15m --for=condition=Ready -n piraeus-datastore -l app.kubernetes.io/name=piraeus-datastore
   kubectl wait LinstorCluster/linstor --timeout=15m --for=condition=Available
 
-  # FIX:
-  # The original script waited for nodes named w0/w1/... which does NOT match your real node names (erwew1..).
-  # We loop actual Kubernetes node names instead.
+  if ! kubectl linstor version >/dev/null 2>&1; then
+    die "kubectl linstor plugin not installed. Install via: kubectl krew install linstor"
+  fi
+
   step "piraeus create-device-pool (auto)"
   local nodes
-  nodes="$(kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' | grep -E '^erwew')"
+  nodes="$(
+    kubectl get nodes -o json \
+      | jq -r '.items[]
+        | select(.metadata.labels["node-role.kubernetes.io/control-plane"] == null)
+        | select(.metadata.labels["node-role.kubernetes.io/master"] == null)
+        | .metadata.name'
+  )"
+
+  if [ -z "$nodes" ]; then
+    die "No worker nodes found for LINSTOR device pool creation"
+  fi
 
   for node in $nodes; do
     step "piraeus wait node $node"
-    while ! kubectl linstor storage-pool list --node "$node" >/dev/null 2>&1; do sleep 3; done
+    local start_time="$SECONDS"
+    local timeout_seconds=600
+    while ! kubectl linstor storage-pool list --node "$node" >/dev/null 2>&1; do
+      if (( SECONDS - start_time > timeout_seconds )); then
+        die "Timed out waiting for LINSTOR to register node $node"
+      fi
+      sleep 3
+    done
 
     step "piraeus create-device-pool $node (/dev/sdb)"
     if ! kubectl linstor storage-pool list --node "$node" --storage-pool lvm 2>/dev/null | grep -q lvm; then
