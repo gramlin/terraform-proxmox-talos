@@ -166,6 +166,37 @@ function configs {
   step "write talosconfig.yml and kubeconfig.yml"
   terraform output -raw talosconfig > talosconfig.yml
   terraform output -raw kubeconfig  > kubeconfig.yml
+
+  if [ ! -s talosconfig.yml ]; then
+    die "talosconfig.yml is empty; terraform output talosconfig returned nothing"
+  fi
+
+  if [ ! -s kubeconfig.yml ]; then
+    die "kubeconfig.yml is empty; terraform output kubeconfig returned nothing"
+  fi
+
+  step "install talosctl and kubectl default configs"
+  local talos_default="$HOME/.talos/config"
+  local kube_default="$HOME/.kube/config"
+  mkdir -p "$(dirname "$talos_default")" "$(dirname "$kube_default")"
+
+  if [ -f "$talos_default" ] && ! cmp -s talosconfig.yml "$talos_default"; then
+    local backup
+    backup="${talos_default}.bak.$(date +%s)"
+    cp "$talos_default" "$backup"
+    warn "Backed up existing talos config to $backup"
+  fi
+  cp talosconfig.yml "$talos_default"
+  chmod 600 "$talos_default"
+
+  if [ -f "$kube_default" ] && ! cmp -s kubeconfig.yml "$kube_default"; then
+    local backup
+    backup="${kube_default}.bak.$(date +%s)"
+    cp "$kube_default" "$backup"
+    warn "Backed up existing kubeconfig to $backup"
+  fi
+  cp kubeconfig.yml "$kube_default"
+  chmod 600 "$kube_default"
 }
 
 function health {
