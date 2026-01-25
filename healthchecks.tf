@@ -97,6 +97,18 @@ resource "null_resource" "cluster_health_checks" {
         KUBECONFIG="$kube_config" kubectl get nodes -o wide
         echo "🟢 Kubernetes: pods (alla namespaces)"
         KUBECONFIG="$kube_config" kubectl get pods -A -o wide
+        echo "🟢 Kubernetes: kontrollplan (kube-system)"
+        KUBECONFIG="$kube_config" kubectl get pods -n kube-system -o wide
+        not_ready_pods=$(KUBECONFIG="$kube_config" kubectl get pods -n kube-system --no-headers | awk '$2 !~ /1\\/1/ || $3 ~ /(CrashLoopBackOff|Error|ImagePullBackOff|CreateContainerConfigError)/ {print $1}')
+        if [ -n "$not_ready_pods" ]; then
+          echo "⚠️  Kubernetes: kontrollplan-pods ej redo, visar detaljer..."
+          for pod in $not_ready_pods; do
+            echo ""
+            echo "----- kube-system/$pod -----"
+            KUBECONFIG="$kube_config" kubectl describe pod -n kube-system "$pod" || true
+            KUBECONFIG="$kube_config" kubectl logs -n kube-system "$pod" --all-containers --tail=200 || true
+          done
+        fi
         echo "🟢 Kubernetes: /readyz"
         KUBECONFIG="$kube_config" kubectl get --raw='/readyz?verbose'
       else
