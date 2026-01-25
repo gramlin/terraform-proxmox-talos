@@ -181,7 +181,9 @@ function piraeus-install {
   kubectl apply --server-side -k "https://github.com/piraeusdatastore/piraeus-operator//config/default?ref=v$piraeus_operator_version"
 
   step "piraeus wait operator"
-  kubectl wait pod --timeout=15m --for=condition=Ready -n piraeus-datastore -l app.kubernetes.io/component=piraeus-operator
+  kubectl wait deployment --timeout=15m --for=condition=Available -n piraeus-datastore \
+    piraeus-operator-controller-manager \
+    piraeus-operator-gencert
 
   step "piraeus relax webhook failure policy"
   local webhook_count
