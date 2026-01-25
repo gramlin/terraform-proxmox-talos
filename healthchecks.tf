@@ -26,7 +26,7 @@ resource "null_resource" "cluster_health_checks" {
       kube_config="$work_dir/kubeconfig"
       controllers_csv="${join(",", [for node in local.controller_nodes : node.address])}"
       workers_csv="${join(",", [for node in local.worker_nodes : node.address])}"
-      nodes_csv="${join(",", concat([for node in local.controller_nodes : node.address], [for node in local.worker_nodes : node.address]))}"
+      primary_controller="${local.controller_nodes[0].address}"
 
       cat > "$talos_config" <<'TALOSCONFIG'
 ${nonsensitive(data.talos_client_configuration.talos.talos_config)}
@@ -42,20 +42,20 @@ KUBECONFIG
         echo ""
         echo "----- $(date -Iseconds) -----"
         if command -v talosctl >/dev/null 2>&1; then
-          if ! talosctl --talosconfig "$talos_config" get members --nodes "$nodes_csv"; then
+          if ! talosctl --talosconfig "$talos_config" --endpoints "$primary_controller" get members --nodes "$controllers_csv"; then
             echo "⚠️  Talos: väntar på noder..."
-          fi
-          if talosctl --talosconfig "$talos_config" health --wait-timeout 10s --nodes "$nodes_csv" --control-plane-nodes "$controllers_csv" --worker-nodes "$workers_csv"; then
-            echo "✅ Talos: klustret rapporterar redo, fortsätter..."
-            break
           fi
         else
           echo "⚠️  talosctl saknas - kan inte visa Talos-status"
         fi
 
         if command -v kubectl >/dev/null 2>&1; then
-          if ! KUBECONFIG="$kube_config" kubectl get nodes -o wide; then
+          if ! KUBECONFIG="$kube_config" kubectl wait --for=condition=Ready nodes --all --timeout=20s; then
             echo "⚠️  Kubernetes: väntar på API/noder..."
+          else
+            KUBECONFIG="$kube_config" kubectl get nodes -o wide
+            echo "✅ Kubernetes: alla noder Ready, fortsätter..."
+            break
           fi
         else
           echo "⚠️  kubectl saknas - kan inte visa Kubernetes-status"
@@ -70,9 +70,9 @@ KUBECONFIG
 
       if command -v talosctl >/dev/null 2>&1; then
         echo "🟢 Talos: talosctl health"
-        talosctl --talosconfig "$talos_config" health --wait-timeout 20m --nodes "$nodes_csv" --control-plane-nodes "$controllers_csv" --worker-nodes "$workers_csv"
+        talosctl --talosconfig "$talos_config" --endpoints "$primary_controller" health --wait-timeout 20m --control-plane-nodes "$controllers_csv" --worker-nodes "$workers_csv"
         echo "🟢 Talos: medlemmar"
-        talosctl --talosconfig "$talos_config" get members --nodes "$nodes_csv"
+        talosctl --talosconfig "$talos_config" --endpoints "$primary_controller" get members --nodes "$controllers_csv"
       else
         echo "⚠️  talosctl saknas - hoppar över Talos-hälsa"
       fi
