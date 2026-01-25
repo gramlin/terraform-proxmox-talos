@@ -99,7 +99,7 @@ resource "null_resource" "cluster_health_checks" {
         KUBECONFIG="$kube_config" kubectl get pods -A -o wide
         echo "🟢 Kubernetes: kontrollplan (kube-system)"
         KUBECONFIG="$kube_config" kubectl get pods -n kube-system -o wide
-        not_ready_pods=$(KUBECONFIG="$kube_config" kubectl get pods -n kube-system --no-headers | awk '$2 !~ /1\\/1/ || $3 ~ /(CrashLoopBackOff|Error|ImagePullBackOff|CreateContainerConfigError)/ {print $1}')
+        not_ready_pods=$(KUBECONFIG="$kube_config" kubectl get pods -n kube-system --no-headers | awk '$2 != "1/1" || $3 ~ /(CrashLoopBackOff|Error|ImagePullBackOff|CreateContainerConfigError)/ {print $1}')
         if [ -n "$not_ready_pods" ]; then
           echo "⚠️  Kubernetes: kontrollplan-pods ej redo, visar detaljer..."
           for pod in $not_ready_pods; do
