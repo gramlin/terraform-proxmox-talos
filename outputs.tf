@@ -15,3 +15,11 @@ output "controllers" {
 output "workers" {
   value = join(",", [for node in local.worker_nodes : node.address])
 }
+
+output "controller_node_names" {
+  value = join(",", [for node in local.controller_nodes : node.name])
+}
+
+output "worker_node_names" {
+  value = join(",", [for node in local.worker_nodes : node.name])
+}
