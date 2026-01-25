@@ -1,70 +1,47 @@
 #!/bin/bash
 set -euo pipefail
 
-# see https://github.com/siderolabs/talos/releases
 # renovate: datasource=github-releases depName=siderolabs/talos
 talos_version="1.12.1"
 
-# see https://github.com/siderolabs/extensions/pkgs/container/qemu-guest-agent
-# see https://github.com/siderolabs/extensions/tree/main/guest-agents/qemu-guest-agent
 talos_qemu_guest_agent_extension_tag="10.2.0@sha256:b2843f69e3cd31ba813c1164f290ebbfddd239d53b3a0eeb19eb2f91fec6fed7"
-
-# see https://github.com/siderolabs/extensions/pkgs/container/drbd
-# see https://github.com/siderolabs/extensions/tree/main/storage/drbd
-# see https://github.com/LINBIT/drbd
 talos_drbd_extension_tag="9.2.16-v1.12.1@sha256:2c0dc35d5f3e1ac23de6eeee5554d9da010ac848a733a538c9568a9ccc782d86"
-
-# see https://github.com/siderolabs/extensions/pkgs/container/spin
-# see https://github.com/siderolabs/extensions/tree/main/container-runtime/spin
 talos_spin_extension_tag="v0.22.0@sha256:823c3b673011e14db0afa3c8bf259f9438b3e1a9cd6ef82f3c6a73b792c392fb"
 
-# see https://github.com/piraeusdatastore/piraeus-operator/releases
 # renovate: datasource=github-releases depName=piraeusdatastore/piraeus-operator
 piraeus_operator_version="2.10.4"
 
 export CHECKPOINT_DISABLE='1'
-export TF_LOG='DEBUG' # TRACE, DEBUG, INFO, WARN or ERROR.
-export TF_LOG_PATH='terraform.log'
 
-export TALOSCONFIG=$PWD/talosconfig.yml
-export KUBECONFIG=$PWD/kubeconfig.yml
+export TALOSCONFIG="$PWD/talosconfig.yml"
+export KUBECONFIG="$PWD/kubeconfig.yml"
 
-function step {
-  echo "### $* ###"
+function step { echo "### $* ###"; }
+
+function require_cmd() {
+  command -v "$1" >/dev/null 2>&1 || {
+    echo "Missing dependency: $1"
+    exit 1
+  }
 }
 
-function update-talos-extension {
-  # see https://github.com/siderolabs/extensions?tab=readme-ov-file#installing-extensions
-  local variable_name="$1"
-  local image_name="$2"
-  local images="$3"
-  local image="$(grep -F "$image_name:" <<<"$images")"
-  local tag="${image#*:}"
-  echo "updating the talos extension to $image..."
-  variable_name="$variable_name" tag="$tag" perl -i -pe '
-    BEGIN {
-      $var = $ENV{variable_name};
-      $val = $ENV{tag};
-    }
-    s/^(\Q$var\E=).*/$1"$val"/;
-  ' do
-}
-
-function update-talos-extensions {
-  step "updating the talos extensions"
-  local images="$(crane export "ghcr.io/siderolabs/extensions:v$talos_version" | tar x -O image-digests)"
-  update-talos-extension talos_qemu_guest_agent_extension_tag ghcr.io/siderolabs/qemu-guest-agent "$images"
-  update-talos-extension talos_drbd_extension_tag ghcr.io/siderolabs/drbd "$images"
-  update-talos-extension talos_spin_extension_tag ghcr.io/siderolabs/spin "$images"
+function deps() {
+  step "check dependencies"
+  require_cmd terraform
+  require_cmd talosctl
+  require_cmd kubectl
+  require_cmd jq
+  require_cmd yq
+  require_cmd qemu-img
+  require_cmd docker
 }
 
 function build_talos_image {
-  # see https://docs.siderolabs.com/talos/v1.12/platform-specific-installations/boot-assets
-  # see https://docs.siderolabs.com/talos/v1.12/platform-specific-installations/bare-metal-platforms/network-config
-  # see Profile type at https://github.com/siderolabs/talos/blob/v1.12.1/pkg/imager/profile/profile.go#L24-L47
+  step "build talos image"
   local talos_version_tag="v$talos_version"
   rm -rf tmp/talos
   mkdir -p tmp/talos
+
   cat >"tmp/talos/talos-$talos_version.yml" <<EOF
 arch: amd64
 platform: nocloud
@@ -91,98 +68,75 @@ output:
     diskFormat: raw
   outFormat: raw
 EOF
+
   docker run --rm -i \
-    -v $PWD/tmp/talos:/secureboot:ro \
-    -v $PWD/tmp/talos:/out \
+    -v "$PWD/tmp/talos:/secureboot:ro" \
+    -v "$PWD/tmp/talos:/out" \
     -v /dev:/dev \
     --privileged \
     "ghcr.io/siderolabs/imager:$talos_version_tag" \
     - < "tmp/talos/talos-$talos_version.yml"
+
   local img_path="tmp/talos/talos-$talos_version.qcow2"
-  qemu-img convert -O qcow2 tmp/talos/nocloud-amd64.raw $img_path
-  qemu-img info $img_path
-  cat >terraform.tfvars <<EOF
+  qemu-img convert -O qcow2 tmp/talos/nocloud-amd64.raw "$img_path"
+  qemu-img info "$img_path"
+
+  # IMPORTANT:
+  # Don't overwrite terraform.tfvars (it may contain your real config).
+  # Use an auto-loaded tfvars instead.
+  cat > talos-version.auto.tfvars <<EOF
 talos_version = "$talos_version"
 EOF
 }
 
-function init {
-  step 'build talos image'
-  build_talos_image
-  step 'terraform init'
+function tf_init {
+  step "terraform init"
   terraform init -lockfile=readonly
 }
 
 function plan {
-  step 'terraform plan'
+  step "terraform plan"
   terraform plan -out=tfplan
 }
 
 function apply {
-  step 'terraform apply'
+  step "terraform apply"
   terraform apply tfplan
-  terraform output -raw talosconfig >talosconfig.yml
-  terraform output -raw kubeconfig >kubeconfig.yml
+  configs
   health
   piraeus-install
   export-kubernetes-ingress-ca-crt
   info
 }
 
+function configs {
+  step "write talosconfig.yml and kubeconfig.yml"
+  terraform output -raw talosconfig > talosconfig.yml
+  terraform output -raw kubeconfig  > kubeconfig.yml
+}
+
 function health {
-  step 'talosctl health'
-  local controllers="$(terraform output -raw controllers)"
-  local workers="$(terraform output -raw workers)"
-  local c0="$(echo $controllers | cut -d , -f 1)"
-  talosctl -e $c0 -n $c0 \
+  step "talosctl health"
+  local controllers
+  local workers
+  controllers="$(terraform output -raw controllers)"
+  workers="$(terraform output -raw workers)"
+  local c0
+  c0="$(echo "$controllers" | cut -d , -f 1)"
+  talosctl -e "$c0" -n "$c0" \
     health \
-    --control-plane-nodes $controllers \
-    --worker-nodes $workers
+    --control-plane-nodes "$controllers" \
+    --worker-nodes "$workers"
 }
 
 function piraeus-install {
-  # see https://github.com/piraeusdatastore/piraeus-operator
-  # see https://github.com/piraeusdatastore/piraeus-operator/blob/v2.10.4/docs/how-to/talos.md
-  # see https://github.com/piraeusdatastore/piraeus-operator/blob/v2.10.4/docs/tutorial/get-started.md
-  # see https://github.com/piraeusdatastore/piraeus-operator/blob/v2.10.4/docs/tutorial/replicated-volumes.md
-  # see https://github.com/piraeusdatastore/piraeus-operator/blob/v2.10.4/docs/explanation/components.md
-  # see https://github.com/piraeusdatastore/piraeus-operator/blob/v2.10.4/docs/reference/linstorsatelliteconfiguration.md
-  # see https://github.com/piraeusdatastore/piraeus-operator/blob/v2.10.4/docs/reference/linstorcluster.md
-  # see https://linbit.com/drbd-user-guide/linstor-guide-1_0-en/
-  # see https://linbit.com/drbd-user-guide/linstor-guide-1_0-en/#ch-kubernetes
-  # see 5.7.1. Available Parameters in a Storage Class at https://linbit.com/drbd-user-guide/linstor-guide-1_0-en/#s-kubernetes-sc-parameters
-  # see https://linbit.com/drbd-user-guide/drbd-guide-9_0-en/
-  # see https://docs.siderolabs.com/kubernetes-guides/csi/storage#piraeus-%2F-linstor
-  step 'piraeus install'
+  step "piraeus install"
   kubectl apply --server-side -k "https://github.com/piraeusdatastore/piraeus-operator//config/default?ref=v$piraeus_operator_version"
-  step 'piraeus wait'
+
+  step "piraeus wait operator"
   kubectl wait pod --timeout=15m --for=condition=Ready -n piraeus-datastore -l app.kubernetes.io/component=piraeus-operator
-  # wait until the webhook endpoint is available.
-  # NB this is required to workaround:
-  #   Error from server (InternalError): error when creating "STDIN": Internal error occurred: failed calling webhook "vlinstorsatelliteconfiguration.kb.io": failed to call webhook: Post "https://piraeus-operator-webhook-service.piraeus-datastore.svc:443/validate-piraeus-io-v1-linstorsatelliteconfiguration?timeout=10s": dial tcp 10.97.116.20:443: connect: operation not permitted
-  while [ \
-    "$(
-      kubectl \
-      run \
-      test-piraeus-webhook \
-      --namespace piraeus-datastore \
-      --restart Never \
-      --rm \
-      --wait \
-      --stdin \
-      --tty \
-      --image alpine/curl:8.14.1 \
-      -- \
-      curl \
-        --insecure \
-        --silent \
-        --fail-with-body \
-        --header content-type:application/json \
-        https://piraeus-operator-webhook-service.piraeus-datastore:443/validate-piraeus-io-v1-linstorsatelliteconfiguration?timeout=5s \
-        | head -1 | jq .response.status.code
-    )" != "400" \
-  ]; do sleep 5; done
-  step 'piraeus configure'
+
+  step "piraeus configure"
   kubectl apply -n piraeus-datastore -f - <<'EOF'
 apiVersion: piraeus.io/v1
 kind: LinstorSatelliteConfiguration
@@ -216,13 +170,15 @@ spec:
             path: /var/etc/lvm/archive
             type: DirectoryOrCreate
 EOF
-  kubectl apply -f - <<EOF
+
+  kubectl apply -f - <<'EOF'
 apiVersion: piraeus.io/v1
 kind: LinstorCluster
 metadata:
   name: linstor
 EOF
-  kubectl apply -f - <<EOF
+
+  kubectl apply -f - <<'EOF'
 apiVersion: storage.k8s.io/v1
 kind: StorageClass
 provisioner: linstor.csi.linbit.com
@@ -236,18 +192,24 @@ parameters:
   linstor.csi.linbit.com/autoPlace: "1"
   linstor.csi.linbit.com/storagePool: lvm
 EOF
-  step 'piraeus configure wait'
+
+  step "piraeus wait datastore"
   kubectl wait pod --timeout=15m --for=condition=Ready -n piraeus-datastore -l app.kubernetes.io/name=piraeus-datastore
   kubectl wait LinstorCluster/linstor --timeout=15m --for=condition=Available
-  step 'piraeus create-device-pool'
-  local workers="$(terraform output -raw workers)"
-  local nodes=($(echo "$workers" | tr ',' ' '))
-  for ((n=0; n<${#nodes[@]}; ++n)); do
-    local node="w$((n))"
+
+  # FIX:
+  # The original script waited for nodes named w0/w1/... which does NOT match your real node names (erwew1..).
+  # We loop actual Kubernetes node names instead.
+  step "piraeus create-device-pool (auto)"
+  local nodes
+  nodes="$(kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' | grep -E '^erwew')"
+
+  for node in $nodes; do
     step "piraeus wait node $node"
     while ! kubectl linstor storage-pool list --node "$node" >/dev/null 2>&1; do sleep 3; done
-    step "piraeus create-device-pool $node"
-    if ! kubectl linstor storage-pool list --node "$node" --storage-pool lvm | grep -q lvm; then
+
+    step "piraeus create-device-pool $node (/dev/sdb)"
+    if ! kubectl linstor storage-pool list --node "$node" --storage-pool lvm 2>/dev/null | grep -q lvm; then
       kubectl linstor physical-storage create-device-pool \
         --pool-name lvm \
         --storage-pool lvm \
@@ -258,78 +220,41 @@ EOF
   done
 }
 
-function piraeus-info {
-  step 'piraeus node list'
-  kubectl linstor node list
-  step 'piraeus storage-pool list'
-  kubectl linstor storage-pool list
-  step 'piraeus volume list'
-  kubectl linstor volume list
-}
-
-function info {
-  local controllers="$(terraform output -raw controllers)"
-  local workers="$(terraform output -raw workers)"
-  local nodes=($(echo "$controllers,$workers" | tr ',' ' '))
-  step 'talos node installer image'
-  for n in "${nodes[@]}"; do
-    # NB there can be multiple machineconfigs in a machine. we only want to see
-    #    the ones with an id that looks like a version tag.
-    # NB machineconfigs.spec is a multi-document yaml.
-    talosctl -n $n get machineconfigs -o json \
-      | jq -r 'select(.metadata.id | test("v\\d+")) | .spec' \
-      | yq -r '.machine.install.image | select(.)' \
-      | sed -E "s,(.+),$n: \1,g"
-  done
-  step 'talos node os-release'
-  for n in "${nodes[@]}"; do
-    talosctl -n $n read /etc/os-release \
-      | sed -E "s,(.+),$n: \1,g"
-  done
-  step 'kubernetes nodes'
-  kubectl get nodes -o wide
-  piraeus-info
-}
-
 function export-kubernetes-ingress-ca-crt {
-  step 'export kubernetes-ingress-ca-crt.pem'
+  step "export kubernetes-ingress-ca-crt.pem"
   kubectl get -n cert-manager secret/ingress-tls -o jsonpath='{.data.tls\.crt}' \
     | base64 -d \
     > kubernetes-ingress-ca-crt.pem
 }
 
+function info {
+  step "kubernetes nodes"
+  kubectl get nodes -o wide
+  step "linstor pools"
+  kubectl linstor storage-pool list || true
+}
+
 function destroy {
+  step "terraform destroy"
   terraform destroy -auto-approve
 }
 
-case $1 in
-  update-talos-extensions)
-    update-talos-extensions
-    ;;
-  init)
-    init
-    ;;
-  plan)
-    plan
-    ;;
-  apply)
-    apply
-    ;;
-  plan-apply)
-    plan
-    apply
-    ;;
-  health)
-    health
-    ;;
-  info)
-    info
-    ;;
-  destroy)
-    destroy
-    ;;
+function init {
+  deps
+  build_talos_image
+  tf_init
+}
+
+case "${1:-}" in
+  init) init ;;
+  plan) plan ;;
+  apply) apply ;;
+  plan-apply) plan; apply ;;
+  configs) configs ;;
+  health) health ;;
+  destroy) destroy ;;
   *)
-    echo $"Usage: $0 {init|plan|apply|plan-apply|health|info}"
+    echo "Usage: $0 {init|plan|apply|plan-apply|configs|health|destroy}"
     exit 1
     ;;
 esac

@@ -4,51 +4,56 @@ locals {
   cluster_node_network_prefix = split("/", var.cluster_node_network)[1]
 }
 
+# Upload the Talos image as a "snippet/iso" file (provider uses it as a disk source)
 # see https://registry.terraform.io/providers/bpg/proxmox/0.93.0/docs/resources/virtual_environment_file
 resource "proxmox_virtual_environment_file" "talos" {
   datastore_id = "local"
   node_name    = var.proxmox_pve_node_name
   content_type = "iso"
+
   source_file {
     path      = "tmp/talos/talos-${var.talos_version}.qcow2"
     file_name = "talos-${var.talos_version}.img"
   }
 }
 
+# Controllers
 # see https://registry.terraform.io/providers/bpg/proxmox/0.93.0/docs/resources/virtual_environment_vm
 resource "proxmox_virtual_environment_vm" "controller" {
   count           = var.controller_count
   name            = "${local.vm_name_prefix}${local.controller_nodes[count.index].name}"
   node_name       = var.proxmox_pve_node_name
-  tags            = sort(["talos", "controller", "cure", "terraform"])
+  tags            = sort(["talos", "controller", "example", "terraform"])
   stop_on_destroy = true
-  bios            = "ovmf"
-  machine         = "q35"
-  scsi_hardware   = "virtio-scsi-single"
-  operating_system {
-    type = "l26"
-  }
+
+  bios          = "ovmf"
+  machine       = "q35"
+  scsi_hardware = "virtio-scsi-single"
+
+  operating_system { type = "l26" }
+
   cpu {
     type  = "host"
     cores = 2
   }
-  memory {
-    dedicated = 6 * 1024
-  }
-  vga {
-    type = "qxl"
-  }
+
+  memory { dedicated = 6 * 1024 }
+
+  vga { type = "qxl" }
+
   network_device {
     bridge = var.proxmox_bridge
   }
-  tpm_state {
-    version = "v2.0"
-  }
+
+  tpm_state { version = "v2.0" }
+
   efi_disk {
     datastore_id = var.proxmox_storage
     file_format  = "raw"
     type         = "4m"
   }
+
+  # OS disk (Talos image)
   disk {
     datastore_id = var.proxmox_storage
     interface    = "scsi0"
@@ -59,10 +64,12 @@ resource "proxmox_virtual_environment_vm" "controller" {
     file_format  = "raw"
     file_id      = proxmox_virtual_environment_file.talos.id
   }
+
   agent {
     enabled = true
     trim    = true
   }
+
   initialization {
     ip_config {
       ipv4 {
@@ -73,40 +80,43 @@ resource "proxmox_virtual_environment_vm" "controller" {
   }
 }
 
+# Workers
 # see https://registry.terraform.io/providers/bpg/proxmox/0.93.0/docs/resources/virtual_environment_vm
 resource "proxmox_virtual_environment_vm" "worker" {
   count           = var.worker_count
   name            = "${local.vm_name_prefix}${local.worker_nodes[count.index].name}"
   node_name       = var.proxmox_pve_node_name
-  tags            = sort(["talos", "worker", "cure", "terraform"])
+  tags            = sort(["talos", "worker", "example", "terraform"])
   stop_on_destroy = true
-  bios            = "ovmf"
-  machine         = "q35"
-  scsi_hardware   = "virtio-scsi-single"
-  operating_system {
-    type = "l26"
-  }
+
+  bios          = "ovmf"
+  machine       = "q35"
+  scsi_hardware = "virtio-scsi-single"
+
+  operating_system { type = "l26" }
+
   cpu {
     type  = "host"
     cores = 4
   }
-  memory {
-    dedicated = 16 * 1024
-  }
-  vga {
-    type = "qxl"
-  }
+
+  memory { dedicated = 16 * 1024 }
+
+  vga { type = "qxl" }
+
   network_device {
     bridge = var.proxmox_bridge
   }
-  tpm_state {
-    version = "v2.0"
-  }
+
+  tpm_state { version = "v2.0" }
+
   efi_disk {
     datastore_id = var.proxmox_storage
     file_format  = "raw"
     type         = "4m"
   }
+
+  # OS disk (Talos image) => /dev/sda
   disk {
     datastore_id = var.proxmox_storage
     interface    = "scsi0"
@@ -117,20 +127,24 @@ resource "proxmox_virtual_environment_vm" "worker" {
     file_format  = "raw"
     file_id      = proxmox_virtual_environment_file.talos.id
   }
+
+  # Data disk for LINSTOR/LVM => /dev/sdb
+  # This is what piraeus "create-device-pool ... /dev/sdb" expects.
   disk {
-  datastore_id = var.proxmox_storage
-  interface    = "scsi1"
-  iothread     = true
-  ssd          = true
-  discard      = "on"
-  size         = 100
-  file_format  = "raw"
-}
+    datastore_id = var.proxmox_storage
+    interface    = "scsi1"
+    iothread     = true
+    ssd          = true
+    discard      = "on"
+    size         = 80
+    file_format  = "raw"
+  }
 
   agent {
     enabled = true
     trim    = true
   }
+
   initialization {
     ip_config {
       ipv4 {
