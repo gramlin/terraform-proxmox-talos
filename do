@@ -16,6 +16,48 @@ export CHECKPOINT_DISABLE='1'
 export TALOSCONFIG="$PWD/talosconfig.yml"
 export KUBECONFIG="$PWD/kubeconfig.yml"
 
+
+# --- preflight ---------------------------------------------------------------
+
+die() { echo "ERROR: $*" >&2; exit 1; }
+
+# Auto-load secrets if present
+if [ -f ./secrets-proxmox.sh ]; then
+  # shellcheck disable=SC1091
+  source ./secrets-proxmox.sh
+fi
+
+# Basic dependency check (keep this list small + relevant)
+need_bins=(
+  terraform
+  docker
+  qemu-img
+  jq
+  yq
+  kubectl
+  talosctl
+)
+for b in "${need_bins[@]}"; do
+  command -v "$b" >/dev/null 2>&1 || die "Missing dependency: $b"
+done
+
+# Proxmox provider env sanity
+[ -n "${PROXMOX_VE_ENDPOINT:-}" ] || die "Missing PROXMOX_VE_ENDPOINT. Run: source ./secrets-proxmox.sh"
+[ -n "${PROXMOX_VE_USERNAME:-}" ] || die "Missing PROXMOX_VE_USERNAME. Run: source ./secrets-proxmox.sh"
+# one of these auth methods must exist
+if [ -z "${PROXMOX_VE_PASSWORD:-}" ] && [ -z "${PROXMOX_VE_API_TOKEN:-}" ]; then
+  die "Missing Proxmox credentials. Set PROXMOX_VE_PASSWORD or PROXMOX_VE_API_TOKEN in secrets-proxmox.sh"
+fi
+
+# Optional: warn if you forgot to disable proxy (kubectl/terraform pain)
+if [ -n "${HTTPS_PROXY:-}" ]; then
+  echo "WARN: HTTPS_PROXY is set ($HTTPS_PROXY). This often breaks Proxmox/k8s calls." >&2
+fi
+
+# ---------------------------------------------------------------------------
+
+
+
 function step { echo "### $* ###"; }
 
 function require_cmd() {
