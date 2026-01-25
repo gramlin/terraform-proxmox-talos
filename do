@@ -16,6 +16,11 @@ export CHECKPOINT_DISABLE='1'
 export TALOSCONFIG="$PWD/talosconfig.yml"
 export KUBECONFIG="$PWD/kubeconfig.yml"
 
+log_file="${DO_LOG_FILE:-$PWD/do.log}"
+mkdir -p "$(dirname "$log_file")"
+exec > >(tee -a "$log_file") 2>&1
+echo "Logging to $log_file"
+
 
 # --- preflight ---------------------------------------------------------------
 
@@ -261,18 +266,38 @@ EOF
   fi
 
   if ! kubectl linstor version >/dev/null 2>&1; then
+    if kubectl krew list 2>/dev/null | awk '{print $1}' | grep -qx "linstor"; then
+      die "kubectl linstor plugin installed via krew but not found in PATH. Add: export PATH=\"$(kubectl krew root)/bin:\$PATH\""
+    fi
     die "kubectl linstor plugin not installed. Install via: kubectl krew install linstor"
   fi
 
   step "piraeus create-device-pool (auto)"
   local nodes
-  nodes="$(
-    kubectl get nodes -o json \
-      | jq -r '.items[]
-        | select(.metadata.labels["node-role.kubernetes.io/control-plane"] == null)
-        | select(.metadata.labels["node-role.kubernetes.io/master"] == null)
-        | .metadata.name'
-  )"
+  local expected_nodes
+  expected_nodes="$(terraform output -raw worker_node_names 2>/dev/null || true)"
+  if [ -n "$expected_nodes" ]; then
+    step "piraeus wait expected worker nodes"
+    for node in ${expected_nodes//,/ }; do
+      local start_time="$SECONDS"
+      local timeout_seconds=600
+      while ! kubectl get node "$node" >/dev/null 2>&1; do
+        if (( SECONDS - start_time > timeout_seconds )); then
+          die "Timed out waiting for Kubernetes node name $node (check prefix/hostname config)"
+        fi
+        sleep 3
+      done
+    done
+    nodes="${expected_nodes//,/ }"
+  else
+    nodes="$(
+      kubectl get nodes -o json \
+        | jq -r '.items[]
+          | select(.metadata.labels["node-role.kubernetes.io/control-plane"] == null)
+          | select(.metadata.labels["node-role.kubernetes.io/master"] == null)
+          | .metadata.name'
+    )"
+  fi
 
   if [ -z "$nodes" ]; then
     die "No worker nodes found for LINSTOR device pool creation"
