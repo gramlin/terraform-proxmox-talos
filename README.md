@@ -119,6 +119,8 @@ Create the infrastructure:
 time ./do plan-apply
 ```
 
+After `plan-apply`, `./do` writes `talosconfig.yml` and `kubeconfig.yml` and also installs them to the default locations (`~/.talos/config` and `~/.kube/config`) so that `talosctl` and `kubectl` work immediately in a new shell.
+
 Show talos information:
 
 ```bash
