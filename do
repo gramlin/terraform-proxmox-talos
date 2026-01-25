@@ -252,7 +252,13 @@ EOF
 
   step "piraeus wait datastore"
   kubectl wait pod --timeout=15m --for=condition=Ready -n piraeus-datastore -l app.kubernetes.io/name=piraeus-datastore
-  kubectl wait LinstorCluster/linstor --timeout=15m --for=condition=Available
+  if ! kubectl wait LinstorCluster/linstor --timeout=15m --for=condition=Available; then
+    warn "LinstorCluster did not become Available within timeout. Dumping diagnostics."
+    kubectl get linstorclusters.piraeus.io linstor -o yaml || true
+    kubectl -n piraeus-datastore get pods -o wide || true
+    kubectl -n piraeus-datastore get events --sort-by=.lastTimestamp | tail -n 50 || true
+    die "LinstorCluster/linstor not available. See diagnostics above."
+  fi
 
   if ! kubectl linstor version >/dev/null 2>&1; then
     die "kubectl linstor plugin not installed. Install via: kubectl krew install linstor"
