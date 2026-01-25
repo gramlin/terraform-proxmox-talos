@@ -283,7 +283,15 @@ EOF
 
   if ! kubectl linstor version >/dev/null 2>&1; then
     if kubectl krew list 2>/dev/null | awk '{print $1}' | grep -qx "linstor"; then
-      die "kubectl linstor plugin installed via krew but not found in PATH. Add: export PATH=\"$(kubectl krew root)/bin:\$PATH\""
+      local krew_root
+      krew_root="$(kubectl krew root 2>/dev/null || true)"
+      if [ -z "$krew_root" ]; then
+        krew_root="$(kubectl krew env KREW_ROOT 2>/dev/null | awk -F= '{print $2}' | tr -d '"')"
+      fi
+      if [ -z "$krew_root" ]; then
+        krew_root="${KREW_ROOT:-$HOME/.krew}"
+      fi
+      die "kubectl linstor plugin installed via krew but not found in PATH. Add: export PATH=\"${krew_root}/bin:\$PATH\""
     fi
     die "kubectl linstor plugin not installed. Install via: kubectl krew install linstor"
   fi
