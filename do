@@ -77,6 +77,7 @@ summary_print() {
 
 restore_terminal() {
   if [ -t 0 ]; then
+    stty sane 2>/dev/null || true
     stty echo 2>/dev/null || true
   fi
 }
