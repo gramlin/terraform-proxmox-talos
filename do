@@ -336,7 +336,7 @@ spec:
             type: DirectoryOrCreate
 EOF
 
-  kubectl apply -f - <<'EOF'
+  kubectl apply -n piraeus-datastore -f - <<'EOF'
 apiVersion: piraeus.io/v1
 kind: LinstorCluster
 metadata:
@@ -360,9 +360,9 @@ EOF
 
   step "piraeus wait datastore"
   kubectl wait pod --timeout=15m --for=condition=Ready -n piraeus-datastore -l app.kubernetes.io/name=piraeus-datastore
-  if ! kubectl wait LinstorCluster/linstor --timeout=15m --for=condition=Available; then
+  if ! kubectl wait LinstorCluster/linstor -n piraeus-datastore --timeout=15m --for=condition=Available; then
     warn "LinstorCluster did not become Available within timeout. Dumping diagnostics."
-    kubectl get linstorclusters.piraeus.io linstor -o yaml || true
+    kubectl get linstorclusters.piraeus.io linstor -n piraeus-datastore -o yaml || true
     kubectl -n piraeus-datastore get pods -o wide || true
     kubectl -n piraeus-datastore get events --sort-by=.lastTimestamp | tail -n 50 || true
     if [ "${DO_DEBUG:-}" = "1" ]; then
