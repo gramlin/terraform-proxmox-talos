@@ -134,23 +134,9 @@ fi
 
 function step { echo "### $* ###"; }
 
-function require_cmd() {
-  command -v "$1" >/dev/null 2>&1 || {
-    echo "Missing dependency: $1"
-    exit 1
-  }
-}
-
 function deps() {
   summary_begin "check dependencies"
   step "check dependencies"
-  require_cmd terraform
-  require_cmd talosctl
-  require_cmd kubectl
-  require_cmd jq
-  require_cmd yq
-  require_cmd qemu-img
-  require_cmd docker
   summary_end
 }
 
@@ -388,21 +374,6 @@ EOF
       kubectl -n piraeus-datastore logs deployment/piraeus-operator-gencert --all-containers --tail=200 || true
     fi
     die "LinstorCluster/linstor not available. See diagnostics above."
-  fi
-
-  if ! kubectl linstor version >/dev/null 2>&1; then
-    local krew_root
-    krew_root="$(kubectl krew root 2>/dev/null || true)"
-    if [ -z "$krew_root" ]; then
-      krew_root="$(kubectl krew env KREW_ROOT 2>/dev/null | awk -F= '{print $2}' | tr -d '"')"
-    fi
-    if [ -z "$krew_root" ]; then
-      krew_root="${KREW_ROOT:-$HOME/.krew}"
-    fi
-    if [ -n "$krew_root" ] && [ -x "$krew_root/bin/kubectl-linstor" ]; then
-      die "kubectl linstor plugin installed via krew but not found in PATH. Add: export PATH=\"${krew_root}/bin:\$PATH\""
-    fi
-    die "kubectl linstor plugin not installed. Install via: kubectl krew install linstor"
   fi
 
   step "piraeus create-device-pool (auto)"
