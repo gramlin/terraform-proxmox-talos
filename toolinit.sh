@@ -18,7 +18,7 @@ require_cmd yq
 require_cmd qemu-img
 require_cmd docker
 
-if ! kubectl linstor version >/dev/null 2>&1; then
+if ! command -v kubectl-linstor >/dev/null 2>&1; then
   krew_root="$(kubectl krew root 2>/dev/null || true)"
   if [ -z "$krew_root" ]; then
     krew_root="$(kubectl krew env KREW_ROOT 2>/dev/null | awk -F= '{print $2}' | tr -d '"')"
