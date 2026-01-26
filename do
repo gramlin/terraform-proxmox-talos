@@ -75,8 +75,19 @@ summary_print() {
   done
 }
 
+restore_terminal() {
+  if [ -t 0 ]; then
+    stty echo 2>/dev/null || true
+  fi
+}
+
+on_exit() {
+  restore_terminal
+  summary_print
+}
+
 trap 'summary_fail' ERR
-trap 'summary_print' EXIT
+trap 'on_exit' EXIT
 
 
 # --- preflight ---------------------------------------------------------------
