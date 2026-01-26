@@ -279,6 +279,8 @@ function health {
 
 function piraeus-install {
   summary_begin "piraeus install"
+  local linstor_device
+  linstor_device="${LINSTOR_DEVICE:-/dev/sdb}"
   step "piraeus install"
   kubectl apply --server-side -k "https://github.com/piraeusdatastore/piraeus-operator//config/default?ref=v$piraeus_operator_version"
 
@@ -419,14 +421,14 @@ EOF
       sleep 3
     done
 
-    step "piraeus create-device-pool $node (/dev/sdb)"
+    step "piraeus create-device-pool $node ($linstor_device)"
     if ! kubectl linstor storage-pool list --node "$node" --storage-pool lvm 2>/dev/null | grep -q lvm; then
       kubectl linstor physical-storage create-device-pool \
         --pool-name lvm \
         --storage-pool lvm \
         lvm \
         "$node" \
-        /dev/sdb
+        "$linstor_device"
     fi
   done
   summary_end
