@@ -544,6 +544,8 @@ kubectl api-resources
 Storage (lvm/drbd/linstor/piraeus):
 
 ```bash
+# If your worker data disk is not /dev/sdb (e.g. /dev/vdb or /dev/sdc), set:
+# export LINSTOR_DEVICE=/dev/vdb
 # NB kubectl linstor node list is equivalent to:
 #    kubectl -n piraeus-datastore exec deploy/linstor-controller -- linstor node list
 kubectl linstor node list
