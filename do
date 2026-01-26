@@ -61,7 +61,7 @@ summary_print() {
   if ((${#summary_items[@]} == 0)); then
     return
   fi
-  echo "### summary ###"
+  printf "\r\033[2K### summary ###\n"
   for i in "${!summary_items[@]}"; do
     local status="${summary_results[$i]}"
     local elapsed=$((SECONDS - summary_started_at[$i]))
@@ -71,7 +71,7 @@ summary_print() {
       failed) symbol="❌" ;;
       running) symbol="⚠️" ;;
     esac
-    echo "${symbol} ${summary_items[$i]} (${status}, ${elapsed}s)"
+    printf "\r\033[2K%s %s (%s, %ss)\n" "${symbol}" "${summary_items[$i]}" "${status}" "${elapsed}"
   done
 }
 
