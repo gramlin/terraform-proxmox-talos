@@ -1,5 +1,5 @@
 #!/bin/bash
-set -euo pipefail
+set -Eeuo pipefail
 
 # Enable extra shell tracing with DO_DEBUG=1
 if [ "${DO_DEBUG:-}" = "1" ]; then
@@ -26,6 +26,68 @@ log_file="${DO_LOG_FILE:-$PWD/do.log}"
 mkdir -p "$(dirname "$log_file")"
 exec > >(tee -a "$log_file") 2>&1
 echo "Logging to $log_file"
+
+summary_items=()
+summary_results=()
+summary_started_at=()
+summary_stack=()
+
+summary_begin() {
+  local name="$1"
+  summary_items+=("$name")
+  summary_results+=("running")
+  summary_started_at+=("$SECONDS")
+  summary_stack+=("$(( ${#summary_items[@]} - 1 ))")
+}
+
+summary_end() {
+  if ((${#summary_stack[@]} == 0)); then
+    return
+  fi
+  local idx="${summary_stack[-1]}"
+  summary_results[$idx]="ok"
+  unset 'summary_stack[-1]'
+}
+
+summary_fail() {
+  if ((${#summary_stack[@]} == 0)); then
+    return
+  fi
+  local idx="${summary_stack[-1]}"
+  summary_results[$idx]="failed"
+}
+
+summary_print() {
+  if ((${#summary_items[@]} == 0)); then
+    return
+  fi
+  echo "### summary ###"
+  for i in "${!summary_items[@]}"; do
+    local status="${summary_results[$i]}"
+    local elapsed=$((SECONDS - summary_started_at[$i]))
+    local symbol="?"
+    case "$status" in
+      ok) symbol="✅" ;;
+      failed) symbol="❌" ;;
+      running) symbol="⚠️" ;;
+    esac
+    echo "${symbol} ${summary_items[$i]} (${status}, ${elapsed}s)"
+  done
+}
+
+restore_terminal() {
+  if [ -t 0 ]; then
+    stty echo 2>/dev/null || true
+  fi
+}
+
+on_exit() {
+  restore_terminal
+  summary_print
+}
+
+trap 'summary_fail' ERR
+trap 'on_exit' EXIT
 
 
 # --- preflight ---------------------------------------------------------------
@@ -80,6 +142,7 @@ function require_cmd() {
 }
 
 function deps() {
+  summary_begin "check dependencies"
   step "check dependencies"
   require_cmd terraform
   require_cmd talosctl
@@ -88,9 +151,11 @@ function deps() {
   require_cmd yq
   require_cmd qemu-img
   require_cmd docker
+  summary_end
 }
 
 function build_talos_image {
+  summary_begin "build talos image"
   step "build talos image"
   local talos_version_tag="v$talos_version"
   rm -rf tmp/talos
@@ -141,19 +206,25 @@ EOF
   cat > talos-version.auto.tfvars <<EOF
 talos_version = "$talos_version"
 EOF
+  summary_end
 }
 
 function tf_init {
+  summary_begin "terraform init"
   step "terraform init"
   terraform init -lockfile=readonly
+  summary_end
 }
 
 function plan {
+  summary_begin "terraform plan"
   step "terraform plan"
   terraform plan -out=tfplan
+  summary_end
 }
 
 function apply {
+  summary_begin "terraform apply"
   step "terraform apply"
   terraform apply tfplan
   configs
@@ -161,9 +232,11 @@ function apply {
   piraeus-install
   export-kubernetes-ingress-ca-crt
   info
+  summary_end
 }
 
 function configs {
+  summary_begin "write kubeconfig and talosconfig"
   step "write talosconfig.yml and kubeconfig.yml"
   terraform output -raw talosconfig > talosconfig.yml
   terraform output -raw kubeconfig  > kubeconfig.yml
@@ -198,9 +271,11 @@ function configs {
   fi
   cp kubeconfig.yml "$kube_default"
   chmod 600 "$kube_default"
+  summary_end
 }
 
 function health {
+  summary_begin "talosctl health"
   step "talosctl health"
   local controllers
   local workers
@@ -212,9 +287,11 @@ function health {
     health \
     --control-plane-nodes "$controllers" \
     --worker-nodes "$workers"
+  summary_end
 }
 
 function piraeus-install {
+  summary_begin "piraeus install"
   step "piraeus install"
   kubectl apply --server-side -k "https://github.com/piraeusdatastore/piraeus-operator//config/default?ref=v$piraeus_operator_version"
 
@@ -380,31 +457,40 @@ EOF
         /dev/sdb
     fi
   done
+  summary_end
 }
 
 function export-kubernetes-ingress-ca-crt {
+  summary_begin "export kubernetes ingress ca"
   step "export kubernetes-ingress-ca-crt.pem"
   kubectl get -n cert-manager secret/ingress-tls -o jsonpath='{.data.tls\.crt}' \
     | base64 -d \
     > kubernetes-ingress-ca-crt.pem
+  summary_end
 }
 
 function info {
+  summary_begin "cluster info"
   step "kubernetes nodes"
   kubectl get nodes -o wide
   step "linstor pools"
   kubectl linstor storage-pool list || true
+  summary_end
 }
 
 function destroy {
+  summary_begin "terraform destroy"
   step "terraform destroy"
   terraform destroy -auto-approve
+  summary_end
 }
 
 function init {
+  summary_begin "init"
   deps
   build_talos_image
   tf_init
+  summary_end
 }
 
 case "${1:-}" in
