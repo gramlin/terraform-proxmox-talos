@@ -279,8 +279,21 @@ function health {
 
 function piraeus-install {
   summary_begin "piraeus install"
-  local linstor_device
-  linstor_device="${LINSTOR_DEVICE:-/dev/sdb}"
+
+  # Default device (used if no per-node mapping and autodetect fails)
+  local default_device
+  default_device="${LINSTOR_DEVICE:-/dev/sdb}"
+
+  # Optional per-node mapping: "node1=/dev/sdb,node2=/dev/vdb"
+  # Node name must match `kubectl get nodes` .metadata.name
+  local device_map
+  device_map="${LINSTOR_DEVICE_MAP:-}"
+
+  # If you REALLY want the script to wipe the chosen device first, set LINSTOR_WIPE=1
+  # WARNING: this is destructive.
+  local do_wipe
+  do_wipe="${LINSTOR_WIPE:-0}"
+
   step "piraeus install"
   kubectl apply --server-side -k "https://github.com/piraeusdatastore/piraeus-operator//config/default?ref=v$piraeus_operator_version"
 
@@ -379,7 +392,53 @@ EOF
     die "LinstorCluster/linstor not available. See diagnostics above."
   fi
 
-  step "piraeus create-device-pool (auto)"
+  # --- helper: pick device for a node --------------------------------------
+
+  pick_device_for_node() {
+    local node_name="$1"
+    local node_ip="$2"
+
+    # 1) explicit map wins
+    if [ -n "$device_map" ]; then
+      local kv
+      IFS=',' read -ra _pairs <<<"$device_map"
+      for kv in "${_pairs[@]}"; do
+        local k="${kv%%=*}"
+        local v="${kv#*=}"
+        if [ "$k" = "$node_name" ] && [ -n "$v" ]; then
+          echo "$v"
+          return 0
+        fi
+      done
+    fi
+
+    # 2) try default device if it exists on the node
+    if talosctl -n "$node_ip" get disks 2>/dev/null | awk '{print $4}' | grep -qx "${default_device##*/}"; then
+      echo "$default_device"
+      return 0
+    fi
+
+    # 3) autodetect: first non-system, non-loop, non-cdrom disk (Talos prints a table)
+    #    - we prefer anything except sda (system) and sr0 (cdrom)
+    local autod
+    autod="$(
+      talosctl -n "$node_ip" get disks 2>/dev/null \
+        | awk 'NR>1 {print $4}' \
+        | grep -Ev '^(loop[0-9]+|sr0|sda)$' \
+        | head -n 1
+    )"
+    if [ -n "$autod" ]; then
+      echo "/dev/$autod"
+      return 0
+    fi
+
+    return 1
+  }
+
+  # --- create device pools on worker nodes ----------------------------------
+
+  step "piraeus create-device-pool (smart)"
+
   local nodes
   local expected_nodes
   expected_nodes="$(terraform output -raw worker_node_names 2>/dev/null || true)"
@@ -411,26 +470,72 @@ EOF
   fi
 
   for node in $nodes; do
-    step "piraeus wait node $node"
+    # Resolve K8s node -> InternalIP for Talos API
+    local node_ip
+    node_ip="$(
+      kubectl get node "$node" -o json \
+        | jq -r '.status.addresses[] | select(.type=="InternalIP") | .address' \
+        | head -n 1
+    )"
+    if [ -z "$node_ip" ] || [ "$node_ip" = "null" ]; then
+      warn "Skipping $node: could not resolve InternalIP"
+      continue
+    fi
+
+    step "piraeus wait node $node (linstor registration)"
     local start_time="$SECONDS"
-    local timeout_seconds=600
-    while ! kubectl linstor storage-pool list --node "$node" >/dev/null 2>&1; do
+    local timeout_seconds=900
+    while ! kubectl linstor node list --node "$node" >/dev/null 2>&1; do
       if (( SECONDS - start_time > timeout_seconds )); then
-        die "Timed out waiting for LINSTOR to register node $node"
+        warn "Timed out waiting for LINSTOR to register node $node (timeout=${timeout_seconds}s)"
+        kubectl -n piraeus-datastore get pods -o wide || true
+        kubectl -n piraeus-datastore logs -l app.kubernetes.io/name=piraeus-datastore --tail=100 || true
+        die "LINSTOR node registration failed for $node"
       fi
-      sleep 3
+      sleep 5
     done
 
-    step "piraeus create-device-pool $node ($linstor_device)"
-    if ! kubectl linstor storage-pool list --node "$node" --storage-pool lvm 2>/dev/null | grep -q lvm; then
-      kubectl linstor physical-storage create-device-pool \
-        --pool-name lvm \
-        --storage-pool lvm \
-        lvm \
-        "$node" \
-        "$linstor_device"
+    # Pick the right disk on THIS node (handles your case where only some nodes have /dev/sdb)
+    local dev
+    if ! dev="$(pick_device_for_node "$node" "$node_ip")"; then
+      warn "Skipping $node ($node_ip): no suitable data disk found (default=$default_device). This node will stay DISKLESS."
+      continue
+    fi
+
+    step "piraeus create-device-pool $node ($dev) [talos=$node_ip]"
+    if kubectl linstor storage-pool list --node "$node" --storage-pool lvm 2>/dev/null | grep -q lvm; then
+      echo "Pool already exists on $node, skipping."
+      continue
+    fi
+
+    if [ "$do_wipe" = "1" ]; then
+      warn "LINSTOR_WIPE=1: wiping $dev on $node_ip (DESTRUCTIVE)"
+      talosctl -n "$node_ip" wipe disk "$dev"
+    fi
+
+    local pool_timeout=300
+    local pool_start="$SECONDS"
+    if timeout "$pool_timeout" kubectl linstor physical-storage create-device-pool \
+      --pool-name lvm \
+      --storage-pool lvm \
+      lvm \
+      "$node" \
+      "$dev"; then
+      echo "Device pool created successfully on $node"
+    else
+      local exit_code=$?
+      if [ $exit_code -eq 124 ]; then
+        warn "Device pool creation TIMED OUT after ${pool_timeout}s on $node with $dev"
+        warn "This often happens when:"
+        warn "  - The device is not visible to the LINSTOR satellite"
+        warn "  - LVM is not properly configured on the node"
+        warn "  - The LINSTOR controller is unreachable"
+        warn "Check with: kubectl -n piraeus-datastore logs -l app=piraeus-datastore"
+      fi
+      die "Device pool creation failed on $node with exit code $exit_code"
     fi
   done
+
   summary_end
 }
 
