@@ -130,9 +130,14 @@ workers="$(terraform output -raw workers)"
 all="$controllers,$workers"
 c0="$(echo $controllers | cut -d , -f 1)"
 w0="$(echo $workers | cut -d , -f 1)"
-talosctl -n $all version
-talosctl -n $all dashboard
+talosctl --nodes "$all" version
+talosctl --nodes "$all" dashboard
 ```
+
+If you see errors such as `unknown shortcut -n` or `unknown command`, ensure the
+`talosctl` binary you installed above is on your `PATH` and matches the
+documented version. Running `command -v talosctl` and `talosctl version` should
+confirm you are using the expected CLI.
 
 Show kubernetes information:
 
@@ -546,6 +551,9 @@ Storage (lvm/drbd/linstor/piraeus):
 ```bash
 # If your worker data disk is not /dev/sdb (e.g. /dev/vdb or /dev/sdc), set:
 # export LINSTOR_DEVICE=/dev/vdb
+# If you only see DfltDisklessStorPool and capacity is 0, the worker data disk
+# was not detected or initialized. Verify the extra disk exists in Proxmox and
+# that LINSTOR_DEVICE matches it, then re-run ./do piraeus-install.
 # NB kubectl linstor node list is equivalent to:
 #    kubectl -n piraeus-datastore exec deploy/linstor-controller -- linstor node list
 kubectl linstor node list
