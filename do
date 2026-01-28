@@ -171,9 +171,18 @@ function stop_linstor_portforward {
   LINSTOR_PF_PID=""
 }
 
-function linstor {
+function linstor_cli {
+  # Ensure port-forward is up so we can talk to the controller from this host.
   start_linstor_portforward || return 1
-  linstor "$@"
+
+  # Use a stable linstor client (avoid kubectl plugin segfaults).
+  # Requires docker on the host.
+  docker run --rm --network host     quay.io/piraeusdatastore/linstor-client:v1.32.3     linstor --controllers 127.0.0.1:3370 "$@"
+}
+
+# Backwards-compatible alias used throughout the script
+function linstor {
+  linstor_cli "$@"
 }
 
 
@@ -557,8 +566,8 @@ fi
 
     step "piraeus wait node $node (linstor registration)"
     local start_time="$SECONDS"
-    local timeout_seconds=600
-    while ! linstor node list 2>/dev/null | grep -Eq "(^|[[:space:]┊])${node}([[:space:]┊]|$)"; do
+    local timeout_seconds=1800
+    while ! linstor node list 2>/dev/null | awk 'NR>1 {print $1}' | grep -qx "$node"; do
       if (( SECONDS - start_time > timeout_seconds )); then
         warn "Timed out waiting for LINSTOR to register node $node"
         echo "---- linstor node list ----"
@@ -590,7 +599,7 @@ fi
 
     if [ "$do_wipe" = "1" ]; then
       warn "LINSTOR_WIPE=1: wiping $dev on $node_ip (DESTRUCTIVE)"
-      talosctl -n "$node_ip" wipe disk "$dev"
+      talosctl -n "$node_ip" wipe disk "${dev##*/}"
     fi
 
     linstor physical-storage create-device-pool \
