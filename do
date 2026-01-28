@@ -326,6 +326,7 @@ metadata:
 spec:
   podTemplate:
     spec:
+      hostNetwork: true
       initContainers:
         - name: drbd-shutdown-guard
           $patch: delete
@@ -440,25 +441,15 @@ EOF
   step "piraeus create-device-pool (smart)"
 
   local nodes
-  local expected_nodes
-  expected_nodes="$(terraform output -raw worker_node_names 2>/dev/null || true)"
-  if [ -n "$expected_nodes" ]; then
-    step "piraeus wait expected worker nodes"
-    for node in ${expected_nodes//,/ }; do
-      local start_time="$SECONDS"
-      local timeout_seconds=600
-      while ! kubectl get node "$node" >/dev/null 2>&1; do
-        if (( SECONDS - start_time > timeout_seconds )); then
-          die "Timed out waiting for Kubernetes node name $node (check prefix/hostname config)"
-        fi
-        sleep 3
-      done
-    done
-    nodes="${expected_nodes//,/ }"
+
+  # Pick worker nodes from Kubernetes (authoritative), not Terraform outputs.
+  # Default: exclude control-plane/master nodes.
+  if [ -n "${LINSTOR_NODES:-}" ]; then
+    # Explicit space/comma separated list of K8s node names
+    nodes="${LINSTOR_NODES//,/ }"
   else
     nodes="$(
-      kubectl get nodes -o json \
-        | jq -r '.items[]
+      kubectl get nodes -o json         | jq -r '.items[]
           | select(.metadata.labels["node-role.kubernetes.io/control-plane"] == null)
           | select(.metadata.labels["node-role.kubernetes.io/master"] == null)
           | .metadata.name'
@@ -484,25 +475,29 @@ EOF
 
     step "piraeus wait node $node (linstor registration)"
     local start_time="$SECONDS"
-    local timeout_seconds=900
-    while ! kubectl linstor node list --node "$node" >/dev/null 2>&1; do
+    local timeout_seconds=600
+    while ! kubectl linstor storage-pool list --node "$node" >/dev/null 2>&1; do
       if (( SECONDS - start_time > timeout_seconds )); then
-        warn "Timed out waiting for LINSTOR to register node $node (timeout=${timeout_seconds}s)"
+        die "Timed out waiting for LINSTOR to register node $node"
+      fi    step "piraeus wait node $node (linstor registration)"
+    local start_time="$SECONDS"
+    local timeout_seconds=600
+    while ! kubectl linstor node list 2>/dev/null | awk '{print $1}' | grep -qx "$node"; do
+      if (( SECONDS - start_time > timeout_seconds )); then
+        warn "Timed out waiting for LINSTOR to register node $node"
+        echo "---- linstor node list ----"
+        kubectl linstor node list || true
+        echo "---- piraeus pods ----"
         kubectl -n piraeus-datastore get pods -o wide || true
-        kubectl -n piraeus-datastore logs -l app.kubernetes.io/name=piraeus-datastore --tail=100 || true
-        die "LINSTOR node registration failed for $node"
+        echo "---- piraeus events (tail) ----"
+        kubectl -n piraeus-datastore get events --sort-by=.lastTimestamp | tail -n 80 || true
+        echo "---- satellite logs (tail) ----"
+        kubectl -n piraeus-datastore logs -l app.kubernetes.io/component=linstor-satellite --all-containers --tail=200 || true
+        die "LINSTOR did not register node $node"
       fi
-      sleep 5
+      sleep 3
     done
-
-    # Pick the right disk on THIS node (handles your case where only some nodes have /dev/sdb)
-    local dev
-    if ! dev="$(pick_device_for_node "$node" "$node_ip")"; then
-      warn "Skipping $node ($node_ip): no suitable data disk found (default=$default_device). This node will stay DISKLESS."
-      continue
-    fi
-
-    step "piraeus create-device-pool $node ($dev) [talos=$node_ip]"
+us create-device-pool $node ($dev) [talos=$node_ip]"
     if kubectl linstor storage-pool list --node "$node" --storage-pool lvm 2>/dev/null | grep -q lvm; then
       echo "Pool already exists on $node, skipping."
       continue
@@ -513,27 +508,12 @@ EOF
       talosctl -n "$node_ip" wipe disk "$dev"
     fi
 
-    local pool_timeout=300
-    local pool_start="$SECONDS"
-    if timeout "$pool_timeout" kubectl linstor physical-storage create-device-pool \
+    kubectl linstor physical-storage create-device-pool \
       --pool-name lvm \
       --storage-pool lvm \
       lvm \
       "$node" \
-      "$dev"; then
-      echo "Device pool created successfully on $node"
-    else
-      local exit_code=$?
-      if [ $exit_code -eq 124 ]; then
-        warn "Device pool creation TIMED OUT after ${pool_timeout}s on $node with $dev"
-        warn "This often happens when:"
-        warn "  - The device is not visible to the LINSTOR satellite"
-        warn "  - LVM is not properly configured on the node"
-        warn "  - The LINSTOR controller is unreachable"
-        warn "Check with: kubectl -n piraeus-datastore logs -l app=piraeus-datastore"
-      fi
-      die "Device pool creation failed on $node with exit code $exit_code"
-    fi
+      "$dev"
   done
 
   summary_end
