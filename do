@@ -295,7 +295,7 @@ function piraeus-install {
   do_wipe="${LINSTOR_WIPE:-0}"
 
   step "piraeus install"
-  kubectl apply --server-side -k "https://github.com/piraeusdatastore/piraeus-operator//config/default?ref=v$piraeus_operator_version"
+  kubectl apply --server-side --force-conflicts -k "https://github.com/piraeusdatastore/piraeus-operator//config/default?ref=v$piraeus_operator_version"
 
   step "piraeus wait operator"
   kubectl wait deployment --timeout=15m --for=condition=Available -n piraeus-datastore \
