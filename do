@@ -84,6 +84,7 @@ restore_terminal() {
 
 on_exit() {
   restore_terminal
+  stop_linstor_portforward || true
   summary_print
 }
 
@@ -134,6 +135,48 @@ fi
 
 
 function step { echo "### $* ###"; }
+
+# --- linstor client helpers --------------------------------------------------
+# kubectl-linstor talks to a LINSTOR controller API. From outside the cluster we
+# normally reach it via kubectl port-forward (localhost:3370).
+LINSTOR_PF_PID=""
+function start_linstor_portforward {
+  if [ "${LINSTOR_PORT_FORWARD:-1}" = "0" ]; then return 0; fi
+  if [ -n "${LINSTOR_PF_PID:-}" ] && kill -0 "$LINSTOR_PF_PID" 2>/dev/null; then return 0; fi
+
+  rm -f /tmp/linstor-portforward.log || true
+  kubectl -n piraeus-datastore port-forward svc/linstor-controller 3370:3370 >/tmp/linstor-portforward.log 2>&1 &
+  LINSTOR_PF_PID=$!
+
+  # Wait until the local API answers.
+  for i in $(seq 1 60); do
+    if curl -fsS -m 1 http://127.0.0.1:3370/v1/controller/version >/dev/null 2>&1; then
+      export LINSTOR_URI="linstor://127.0.0.1:3370"
+      export LINSTOR_CONTROLLERS="127.0.0.1:3370"
+      return 0
+    fi
+    sleep 1
+  done
+
+  warn "LINSTOR port-forward did not become ready. Last log lines:"
+  tail -n 80 /tmp/linstor-portforward.log >&2 || true
+  return 1
+}
+
+function stop_linstor_portforward {
+  if [ -n "${LINSTOR_PF_PID:-}" ] && kill -0 "$LINSTOR_PF_PID" 2>/dev/null; then
+    kill "$LINSTOR_PF_PID" 2>/dev/null || true
+    wait "$LINSTOR_PF_PID" 2>/dev/null || true
+  fi
+  LINSTOR_PF_PID=""
+}
+
+function linstor {
+  start_linstor_portforward || return 1
+  linstor "$@"
+}
+
+
 
 function deps() {
   summary_begin "check dependencies"
@@ -515,11 +558,11 @@ fi
     step "piraeus wait node $node (linstor registration)"
     local start_time="$SECONDS"
     local timeout_seconds=600
-    while ! kubectl linstor node list 2>/dev/null | grep -Eq "(^|[[:space:]┊])${node}([[:space:]┊]|$)"; do
+    while ! linstor node list 2>/dev/null | grep -Eq "(^|[[:space:]┊])${node}([[:space:]┊]|$)"; do
       if (( SECONDS - start_time > timeout_seconds )); then
         warn "Timed out waiting for LINSTOR to register node $node"
         echo "---- linstor node list ----"
-        kubectl linstor node list || true
+        linstor node list || true
         echo "---- piraeus pods ----"
         kubectl -n piraeus-datastore get pods -o wide || true
         echo "---- piraeus events (tail) ----"
@@ -540,7 +583,7 @@ fi
     fi
 
     step "piraeus create-device-pool $node ($dev) [talos=$node_ip]"
-    if kubectl linstor storage-pool list --node "$node" --storage-pool lvm 2>/dev/null | grep -q lvm; then
+    if linstor storage-pool list --node "$node" --storage-pool lvm 2>/dev/null | grep -q lvm; then
       echo "Pool already exists on $node, skipping."
       continue
     fi
@@ -550,7 +593,7 @@ fi
       talosctl -n "$node_ip" wipe disk "$dev"
     fi
 
-    kubectl linstor physical-storage create-device-pool \
+    linstor physical-storage create-device-pool \
       --pool-name lvm \
       --storage-pool lvm \
       lvm \
@@ -575,7 +618,7 @@ function info {
   step "kubernetes nodes"
   kubectl get nodes -o wide
   step "linstor pools"
-  kubectl linstor storage-pool list || true
+  linstor storage-pool list || true
   step "linstor pvc smoke test"
   storage_smoke_test
   summary_end
@@ -666,7 +709,7 @@ EOF
   kubectl -n "$ns" logs smoke-pod || true
 
   step "linstor volumes"
-  kubectl linstor volume list || true
+  linstor volume list || true
 
   step "cleanup"
   kubectl delete ns "$ns" --wait=false >/dev/null 2>&1 || true
