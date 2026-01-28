@@ -227,6 +227,9 @@ function configs {
   step "write talosconfig.yml and kubeconfig.yml"
   terraform output -raw talosconfig > talosconfig.yml
   terraform output -raw kubeconfig  > kubeconfig.yml
+  step "write kubeconfig.lens.yml (flattened)"
+  KUBECONFIG="$PWD/kubeconfig.yml" kubectl config view --raw --flatten > kubeconfig.lens.yml
+
 
   if [ ! -s talosconfig.yml ]; then
     die "talosconfig.yml is empty; terraform output talosconfig returned nothing"
@@ -258,10 +261,6 @@ function configs {
   fi
   cp kubeconfig.yml "$kube_default"
   chmod 600 "$kube_default"
-
-  # skapa “self-contained” kubeconfig för Lens
-  KUBECONFIG=./kubeconfig.yml kubectl config view --raw --flatten > ./kubeconfig.lens.yml
-
   summary_end
 }
 
@@ -543,6 +542,8 @@ function info {
   kubectl get nodes -o wide
   step "linstor pools"
   kubectl linstor storage-pool list || true
+  step "linstor pvc smoke test"
+  storage_smoke_test
   summary_end
 }
 
@@ -574,3 +575,68 @@ case "${1:-}" in
     exit 1
     ;;
 esac
+function storage_smoke_test {
+  summary_begin "linstor pvc smoke test"
+  local ns="linstor-smoke"
+  # Create namespace (idempotent)
+  kubectl get ns "$ns" >/dev/null 2>&1 || kubectl create ns "$ns"
+
+  step "apply pvc+pod"
+  cat <<'EOF' | kubectl -n "$ns" apply -f -
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: smoke-pvc
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 1Gi
+  storageClassName: linstor-lvm-r1
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: smoke-pod
+spec:
+  restartPolicy: Never
+  containers:
+  - name: bb
+    image: busybox:1.36
+    command: ["sh","-c"]
+    args:
+      - |
+        set -eux
+        echo "hello from linstor" > /data/hello.txt
+        sync
+        cat /data/hello.txt
+        sleep 2
+    volumeMounts:
+    - name: data
+      mountPath: /data
+  volumes:
+  - name: data
+    persistentVolumeClaim:
+      claimName: smoke-pvc
+EOF
+
+  step "wait pvc bound"
+  kubectl -n "$ns" wait --for=condition=Bound pvc/smoke-pvc --timeout=5m
+
+  step "wait pod completed"
+  # Wait for pod to be ready first (image pull), then completed.
+  kubectl -n "$ns" wait --for=condition=Ready pod/smoke-pod --timeout=5m || true
+  kubectl -n "$ns" wait --for=jsonpath='{.status.phase}'=Succeeded pod/smoke-pod --timeout=10m
+
+  step "show pod logs"
+  kubectl -n "$ns" logs smoke-pod || true
+
+  step "linstor volumes"
+  kubectl linstor volume list || true
+
+  step "cleanup"
+  kubectl delete ns "$ns" --wait=false >/dev/null 2>&1 || true
+  summary_end
+}
+
+
