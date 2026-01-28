@@ -258,6 +258,10 @@ function configs {
   fi
   cp kubeconfig.yml "$kube_default"
   chmod 600 "$kube_default"
+
+  # skapa “self-contained” kubeconfig för Lens
+  KUBECONFIG=./kubeconfig.yml kubectl config view --raw --flatten > ./kubeconfig.lens.yml
+
   summary_end
 }
 
