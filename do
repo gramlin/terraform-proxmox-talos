@@ -394,6 +394,40 @@ EOF
       kubectl -n piraeus-datastore logs deployment/piraeus-operator-controller-manager --all-containers --tail=200 || true
       kubectl -n piraeus-datastore logs deployment/piraeus-operator-gencert --all-containers --tail=200 || true
     fi
+
+# --- auto-repair: stuck migration requiring rollback (fresh clusters) ---
+# Symptom: linstor-controller init container run-migration fails with:
+#   "Cannot perform Migration ... while a rollback has to be done"
+# With Cilium kube-proxy replacement this can also surface as "Operation not permitted"
+# when connecting to the linstor-controller service (because it has no endpoints yet).
+#
+# Default behavior: attempt ONE automatic reset on fresh clusters.
+# Set LINSTOR_DB_RESET=0 to disable (recommended once you have real data).
+if [ "${LINSTOR_DB_RESET:-1}" = "1" ]; then
+  if kubectl -n piraeus-datastore logs -l app.kubernetes.io/component=linstor-controller -c run-migration --tail=300 2>/dev/null \
+      | grep -qiE "rollback has to be done|Cannot perform Migration"; then
+    warn "Detected LINSTOR migration rollback requirement. Resetting LINSTOR CRD database (fresh cluster)."
+    kubectl -n piraeus-datastore scale deployment piraeus-operator-controller-manager --replicas=0 >/dev/null 2>&1 || true
+    kubectl -n piraeus-datastore scale deployment linstor-controller --replicas=0 >/dev/null 2>&1 || true
+
+    # Delete LINSTOR internal CRD-backed 'database' objects (safe for fresh clusters only!)
+    kubectl api-resources --api-group=internal.linstor.linbit.com -o name 2>/dev/null \
+      | xargs --no-run-if-empty kubectl delete --ignore-not-found >/dev/null 2>&1 || true
+
+    # Restart controller/operator
+    kubectl -n piraeus-datastore delete pod -l app.kubernetes.io/component=linstor-controller --ignore-not-found >/dev/null 2>&1 || true
+    kubectl -n piraeus-datastore scale deployment piraeus-operator-controller-manager --replicas=1 >/dev/null 2>&1 || true
+    kubectl -n piraeus-datastore scale deployment linstor-controller --replicas=1 >/dev/null 2>&1 || true
+
+    warn "Waiting again for LinstorCluster/linstor after reset..."
+    if kubectl wait LinstorCluster/linstor -n piraeus-datastore --timeout=15m --for=condition=Available; then
+      info "LinstorCluster/linstor became Available after reset."
+      return 0
+    fi
+    warn "Auto-reset did not resolve the issue. Continuing with diagnostics failure."
+  fi
+fi
+
     die "LinstorCluster/linstor not available. See diagnostics above."
   fi
 
