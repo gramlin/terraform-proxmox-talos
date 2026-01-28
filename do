@@ -441,7 +441,6 @@ EOF
 
   step "piraeus create-device-pool (smart)"
 
-\
   local nodes
 
   # Source of truth: Kubernetes worker nodes (not Terraform output)
@@ -476,11 +475,10 @@ EOF
       continue
     fi
 
-\
     step "piraeus wait node $node (linstor registration)"
     local start_time="$SECONDS"
     local timeout_seconds=600
-    while ! kubectl linstor node list 2>/dev/null | awk '{print $1}' | grep -qx "$node"; do
+    while ! kubectl linstor node list 2>/dev/null | grep -Eq "(^|[[:space:]┊])${node}([[:space:]┊]|$)"; do
       if (( SECONDS - start_time > timeout_seconds )); then
         warn "Timed out waiting for LINSTOR to register node $node"
         echo "---- linstor node list ----"
