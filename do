@@ -327,6 +327,7 @@ spec:
   podTemplate:
     spec:
       hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
       initContainers:
         - name: drbd-shutdown-guard
           $patch: delete
@@ -440,16 +441,17 @@ EOF
 
   step "piraeus create-device-pool (smart)"
 
+\
   local nodes
 
-  # Pick worker nodes from Kubernetes (authoritative), not Terraform outputs.
-  # Default: exclude control-plane/master nodes.
+  # Source of truth: Kubernetes worker nodes (not Terraform output)
+  # Optional override: export LINSTOR_NODES="node1 node2"
   if [ -n "${LINSTOR_NODES:-}" ]; then
-    # Explicit space/comma separated list of K8s node names
-    nodes="${LINSTOR_NODES//,/ }"
+    nodes="$LINSTOR_NODES"
   else
     nodes="$(
-      kubectl get nodes -o json         | jq -r '.items[]
+      kubectl get nodes -o json \
+        | jq -r '.items[]
           | select(.metadata.labels["node-role.kubernetes.io/control-plane"] == null)
           | select(.metadata.labels["node-role.kubernetes.io/master"] == null)
           | .metadata.name'
@@ -457,6 +459,7 @@ EOF
   fi
 
   if [ -z "$nodes" ]; then
+
     die "No worker nodes found for LINSTOR device pool creation"
   fi
 
@@ -473,13 +476,8 @@ EOF
       continue
     fi
 
+\
     step "piraeus wait node $node (linstor registration)"
-    local start_time="$SECONDS"
-    local timeout_seconds=600
-    while ! kubectl linstor storage-pool list --node "$node" >/dev/null 2>&1; do
-      if (( SECONDS - start_time > timeout_seconds )); then
-        die "Timed out waiting for LINSTOR to register node $node"
-      fi    step "piraeus wait node $node (linstor registration)"
     local start_time="$SECONDS"
     local timeout_seconds=600
     while ! kubectl linstor node list 2>/dev/null | awk '{print $1}' | grep -qx "$node"; do
@@ -497,7 +495,16 @@ EOF
       fi
       sleep 3
     done
-us create-device-pool $node ($dev) [talos=$node_ip]"
+
+
+    # Pick the right disk on THIS node (handles your case where only some nodes have /dev/sdb)
+    local dev
+    if ! dev="$(pick_device_for_node "$node" "$node_ip")"; then
+      warn "Skipping $node ($node_ip): no suitable data disk found (default=$default_device). This node will stay DISKLESS."
+      continue
+    fi
+
+    step "piraeus create-device-pool $node ($dev) [talos=$node_ip]"
     if kubectl linstor storage-pool list --node "$node" --storage-pool lvm 2>/dev/null | grep -q lvm; then
       echo "Pool already exists on $node, skipping."
       continue
