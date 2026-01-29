@@ -429,7 +429,7 @@ spec:
     - name: ${POOL_NAME}
       lvmPool:
         volumeGroup: ${POOL_NAME}
-        hostDevices:
+        devicePaths:
           - ${dev}
 ---
 YAML
