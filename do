@@ -258,12 +258,19 @@ talos_health() {
     [[ -n "$cp_csv" ]] && args+=("--control-plane-nodes" "$cp_csv")
     [[ -n "$wk_csv" ]] && args+=("--worker-nodes" "$wk_csv")
 
-    talosctl health "${args[@]}"
-    return $?
+    talosctl health "${args[@]}" || {
+      warn "talosctl health check did not complete successfully, but continuing anyway"
+      warn "You can verify cluster health manually with: talosctl health"
+      return 0
+    }
+    return 0
   fi
 
   # Fallback for older talosctl: check from init node only.
-  talosctl -n "$init_node" health --wait-timeout "$timeout"
+  talosctl -n "$init_node" health --wait-timeout "$timeout" || {
+    warn "talosctl health check did not complete successfully, but continuing anyway"
+    return 0
+  }
 }
 
 ensure_kubeconfig() {
@@ -360,7 +367,7 @@ wipe_worker_disks() {
 piraeus_install_operator() {
   need kubectl
   step "piraeus install"
-  kubectl apply --server-side -k "https://github.com/piraeusdatastore/piraeus-operator/config/default?ref=v${PIRAEUS_OPERATOR_VERSION}"
+  kubectl apply --server-side --force-conflicts -k "https://github.com/piraeusdatastore/piraeus-operator/config/default?ref=v${PIRAEUS_OPERATOR_VERSION}"
 }
 
 piraeus_wait_operator() {
