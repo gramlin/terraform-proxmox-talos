@@ -247,15 +247,17 @@ talos_health() {
   #
   # If the new flags exist, use them.
   if talosctl health --help 2>&1 | grep -q -- '--control-plane-nodes'; then
-    local args=("--init-node" "$init_node" "--wait-timeout" "$timeout")
-    local ip
-    for ip in "${CONTROLLERS[@]}"; do
-      args+=("--control-plane-nodes" "$ip")
-    done
-    for ip in "${WORKERS[@]}"; do
-      [[ -n "$ip" ]] || continue
-      args+=("--worker-nodes" "$ip")
-    done
+    # talosctl health can be picky about how multi-value flags are provided.
+    # Passing the flag multiple times can still trip the "multiple nodes" guard
+    # in some versions. Use a single comma-separated value instead.
+    local cp_csv wk_csv
+    cp_csv="$(IFS=,; echo "${CONTROLLERS[*]}")"
+    wk_csv="$(IFS=,; echo "${WORKERS[*]}")"
+
+    local args=("--nodes" "$init_node" "--init-node" "$init_node" "--wait-timeout" "$timeout")
+    [[ -n "$cp_csv" ]] && args+=("--control-plane-nodes" "$cp_csv")
+    [[ -n "$wk_csv" ]] && args+=("--worker-nodes" "$wk_csv")
+
     talosctl health "${args[@]}"
     return $?
   fi
