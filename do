@@ -1,18 +1,21 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# do.v9 — Talos + Proxmox + Terraform + Piraeus Datastore (LINSTOR)
+# do.v10 — Talos + Proxmox + Terraform + Piraeus Datastore (LINSTOR)
 #
-# Fixes vs v8:
-#  - Adds `reset-piraeus` (uninstall Piraeus/LINSTOR from an existing cluster)
-#  - Makes webhook relaxation idempotent (avoids SSA conflicts) and patches ALL webhooks
-#  - Supports per-node device overrides via DEVICE_MAP when creating storage pools declaratively
-#  - Avoids any dependency on `kubectl linstor` / host linstor CLI (prevents segfault + brittle parsing)
+# What this version fixes/changes:
+#  - Re-introduces explicit Terraform plan/apply flow (plan, apply, plan-apply)
+#  - Adds reset-all (includes reset-piraeus + terraform destroy + local cleanup)
+#  - Keeps the v9 improvements: avoids kubectl-linstor/linstor-cli parsing (prevents segfault loops)
+#  - Creates storage pools declaratively via LinstorSatelliteConfiguration (no linstor CLI required)
 #
 # Commands:
-#   ./do.v9 apply
-#   ./do.v9 destroy
-#   ./do.v9 reset-piraeus
+#   ./do.v10 plan
+#   ./do.v10 apply
+#   ./do.v10 plan-apply
+#   ./do.v10 destroy
+#   ./do.v10 reset-piraeus
+#   ./do.v10 reset-all
 
 # -----------------------------
 # Config (override via env)
@@ -30,17 +33,25 @@ POOL_NAME="${POOL_NAME:-lvm}"
 STORAGECLASS_NAME="${STORAGECLASS_NAME:-linstor-lvm-r1}"
 AUTO_PLACE="${AUTO_PLACE:-1}"  # LINSTOR autoplace replicas
 
-# Misc
+# Files
 WORKDIR="${WORKDIR:-$PWD}"
+TFPLAN_OUT="${TFPLAN_OUT:-$WORKDIR/tfplan}"
 KUBECONFIG_OUT="${KUBECONFIG_OUT:-$WORKDIR/kubeconfig.yml}"
 KUBECONFIG_LENS_OUT="${KUBECONFIG_LENS_OUT:-$WORKDIR/kubeconfig.lens.yml}"
 TALOSCONFIG_OUT="${TALOSCONFIG_OUT:-$WORKDIR/talosconfig.yml}"
+INGRESS_CA_OUT="${INGRESS_CA_OUT:-$WORKDIR/kubernetes-ingress-ca-crt.pem}"
 
 # Behaviors
 SKIP_TERRAFORM="${SKIP_TERRAFORM:-0}"
+SKIP_PLAN="${SKIP_PLAN:-0}"           # apply: skip terraform plan (use direct terraform apply)
 SKIP_PIRAEUS="${SKIP_PIRAEUS:-0}"
-WIPE_DISKS="${WIPE_DISKS:-0}" # set to 1 to wipe worker data disks before creating pools
-RESET_LINSTOR_DB="${RESET_LINSTOR_DB:-0}" # set to 1 with reset-piraeus to also delete internal.linstor.linbit.com CRs
+WIPE_DISKS="${WIPE_DISKS:-0}"         # set to 1 to wipe worker data disks before creating pools
+RESET_LINSTOR_DB="${RESET_LINSTOR_DB:-0}" # set to 1 with reset-piraeus/reset-all to delete internal.linstor.linbit.com CRs
+
+# reset-all cleanup knobs
+RESET_LOCAL="${RESET_LOCAL:-1}"       # remove generated kubeconfig/talosconfig/tfplan/ingress CA
+NUKE_TERRAFORM_DIR="${NUKE_TERRAFORM_DIR:-0}" # remove .terraform/ and crash logs
+NUKE_STATE="${NUKE_STATE:-0}"         # remove terraform.tfstate* (DANGEROUS)
 
 # -----------------------------
 # Pretty helpers
@@ -75,7 +86,7 @@ split_list() {
   tr ',\n' '  ' | awk '{for(i=1;i<=NF;i++) print $i}'
 }
 
-load_cluster_vars() {
+load_cluster_vars_strict() {
   local controllers_raw workers_raw c_names_raw w_names_raw
   controllers_raw="$(read_tf_output controllers)"
   workers_raw="$(read_tf_output workers)"
@@ -100,16 +111,34 @@ load_cluster_vars() {
   info "WorkerNames: ${W_NAMES[*]}"
 }
 
+try_load_cluster_vars() {
+  # best-effort loader: returns non-zero if outputs missing
+  local controllers_raw workers_raw c_names_raw w_names_raw
+  controllers_raw="$(read_tf_output controllers)"
+  workers_raw="$(read_tf_output workers)"
+  c_names_raw="$(read_tf_output controller_node_names)"
+  w_names_raw="$(read_tf_output worker_node_names)"
+
+  if [[ -z "${controllers_raw}${workers_raw}${c_names_raw}${w_names_raw}" ]]; then
+    return 1
+  fi
+
+  mapfile -t CONTROLLERS < <(printf '%s' "$controllers_raw" | split_list)
+  mapfile -t WORKERS     < <(printf '%s' "$workers_raw"     | split_list)
+  mapfile -t C_NAMES     < <(printf '%s' "$c_names_raw"     | split_list)
+  mapfile -t W_NAMES     < <(printf '%s' "$w_names_raw"     | split_list)
+
+  [[ ${#CONTROLLERS[@]} -ge 1 && ${#WORKERS[@]} -ge 1 && ${#W_NAMES[@]} -ge 1 ]]
+}
+
 # -----------------------------
 # Kube/Talos config discovery
 # -----------------------------
 ensure_kubeconfig() {
-  # If user already exported KUBECONFIG, keep it.
   if [[ -n "${KUBECONFIG:-}" ]]; then
     return 0
   fi
 
-  # Prefer known output locations.
   if [[ -f "$KUBECONFIG_OUT" ]]; then
     export KUBECONFIG="$KUBECONFIG_OUT"
     return 0
@@ -119,7 +148,6 @@ ensure_kubeconfig() {
     return 0
   fi
 
-  # Try terraform output as a fallback (if available).
   if command -v terraform >/dev/null 2>&1; then
     if terraform output -raw kubeconfig >/dev/null 2>&1; then
       terraform output -raw kubeconfig >"$KUBECONFIG_OUT"
@@ -128,7 +156,7 @@ ensure_kubeconfig() {
     fi
   fi
 
-  die "no kubeconfig found. Set KUBECONFIG or run './do.v9 apply' to generate kubeconfig.yml"
+  die "no kubeconfig found. Set KUBECONFIG or run './do.v10 apply' to generate kubeconfig.yml"
 }
 
 ensure_talosconfig() {
@@ -152,7 +180,7 @@ ensure_talosconfig() {
     fi
   fi
 
-  die "no talosconfig found. Set TALOSCONFIG or run './do.v9 apply' to generate talosconfig.yml"
+  die "no talosconfig found. Set TALOSCONFIG or run './do.v10 apply' to generate talosconfig.yml"
 }
 
 # -----------------------------
@@ -217,6 +245,12 @@ wipe_worker_disks() {
   step "wipe worker data disks (Talos)"
   need talosctl
   ensure_talosconfig
+
+  # Requires cluster vars
+  if ! try_load_cluster_vars; then
+    warn "No terraform outputs available to locate workers; skipping disk wipe."
+    return 0
+  fi
 
   local i node ip dev short
   for i in "${!WORKERS[@]}"; do
@@ -327,9 +361,6 @@ piraeus_install_operator() {
 }
 
 piraeus_relax_webhooks() {
-  # Some environments transiently fail admission webhooks during bootstrap.
-  # Setting failurePolicy=Ignore makes the installation more resilient.
-  # IMPORTANT: do this in a way that doesn't permanently break idempotent SSA.
   step "piraeus relax validating webhooks (failurePolicy=Ignore)"
 
   local names
@@ -339,8 +370,6 @@ piraeus_relax_webhooks() {
     return 0
   fi
 
-  # Patch all webhook entries to Ignore using python3 to generate json-patch operations.
-  # If python3 isn't available, fall back to a best-effort patch of index 0.
   while read -r name; do
     [[ -n "$name" ]] || continue
 
@@ -374,7 +403,6 @@ kind: LinstorSatelliteConfiguration
 metadata:
   name: talos-loader-override
 spec:
-  # Applies to all nodes by default
   podTemplate:
     spec:
       initContainers:
@@ -437,11 +465,17 @@ wait_linstor_ready() {
 wait_satellites_ready() {
   step "wait for linstor-satellite pods on all worker nodes"
 
+  # Requires worker node names
+  if ! try_load_cluster_vars; then
+    warn "No terraform outputs available to determine expected worker nodes. Waiting for any satellites Ready instead."
+    kubectl -n piraeus-datastore wait pod -l app.kubernetes.io/component=linstor-satellite --for=condition=Ready --timeout=15m
+    return 0
+  fi
+
   local node pod
   for node in "${W_NAMES[@]}"; do
     info "Waiting for satellite on $node"
 
-    # Find satellite pod scheduled to this node.
     pod="$(kubectl -n piraeus-datastore get pods \
       -l app.kubernetes.io/component=linstor-satellite \
       --field-selector "spec.nodeName=${node}" \
@@ -449,11 +483,7 @@ wait_satellites_ready() {
 
     if [[ -z "$pod" ]]; then
       warn "No linstor-satellite pod found yet on $node. Waiting for it to appear..."
-      if ! kubectl -n piraeus-datastore wait pod \
-        -l app.kubernetes.io/component=linstor-satellite \
-        --for=condition=Ready --timeout=10m; then
-        true
-      fi
+      kubectl -n piraeus-datastore wait pod -l app.kubernetes.io/component=linstor-satellite --for=condition=Ready --timeout=15m || true
       pod="$(kubectl -n piraeus-datastore get pods -l app.kubernetes.io/component=linstor-satellite --field-selector "spec.nodeName=${node}" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
     fi
 
@@ -473,11 +503,9 @@ wait_satellites_ready() {
 }
 
 start_linstor_port_forward() {
-  # Optional, but handy for quick debugging via curl on localhost:3370
   step "port-forward linstor-controller to localhost:3370"
 
   if kubectl -n piraeus-datastore get svc linstor-controller >/dev/null 2>&1; then
-    # Kill any existing port-forward using this port from previous runs
     (lsof -ti tcp:3370 2>/dev/null | xargs -r kill >/dev/null 2>&1) || true
 
     kubectl -n piraeus-datastore port-forward svc/linstor-controller 3370:3370 >/dev/null 2>&1 &
@@ -486,10 +514,12 @@ start_linstor_port_forward() {
     for _ in {1..30}; do
       if curl -sS --max-time 1 http://127.0.0.1:3370/v1/controller/version >/dev/null 2>&1; then
         info "LINSTOR API reachable on http://127.0.0.1:3370"
-        break
+        return 0
       fi
       sleep 1
     done
+
+    warn "Port-forward started but LINSTOR API did not respond on localhost:3370 yet"
   else
     warn "linstor-controller service not found; skipping port-forward"
   fi
@@ -552,8 +582,6 @@ YAML
 # -----------------------------
 strip_finalizers_ns_if_stuck() {
   local ns="$1"
-  # If ns is Terminating for a long time, clearing finalizers can help.
-  # We do this only if delete is already in progress.
   local phase
   phase="$(kubectl get ns "$ns" -o jsonpath='{.status.phase}' 2>/dev/null || true)"
   if [[ "$phase" == "Terminating" ]]; then
@@ -571,59 +599,85 @@ cmd_reset_piraeus() {
   warn "This removes Piraeus/LINSTOR resources from the CURRENT cluster referenced by KUBECONFIG."
   info "KUBECONFIG=$KUBECONFIG"
 
-  # Delete smoke namespace (if any)
   kubectl delete ns linstor-smoke --ignore-not-found --timeout=2m >/dev/null 2>&1 || true
-
-  # Delete our StorageClass
   kubectl delete storageclass "$STORAGECLASS_NAME" --ignore-not-found >/dev/null 2>&1 || true
 
-  # Delete core CRs
   kubectl -n piraeus-datastore delete linstorcluster linstor --ignore-not-found --timeout=3m >/dev/null 2>&1 || true
   kubectl delete linstorsatelliteconfigurations.piraeus.io --all --ignore-not-found >/dev/null 2>&1 || true
 
   if [[ "$RESET_LINSTOR_DB" == "1" ]]; then
     step "reset LINSTOR internal CRD DB (internal.linstor.linbit.com)"
-    # Delete internal CRs if api group exists
     if kubectl api-resources --api-group=internal.linstor.linbit.com -o name >/dev/null 2>&1; then
       kubectl api-resources --api-group=internal.linstor.linbit.com -o name \
         | xargs -r -n1 kubectl delete --all --ignore-not-found >/dev/null 2>&1 || true
     fi
   fi
 
-  # Delete namespace
   kubectl delete ns piraeus-datastore --ignore-not-found --timeout=5m >/dev/null 2>&1 || true
   strip_finalizers_ns_if_stuck piraeus-datastore
 
-  # Attempt uninstall operator components + CRDs
   step "delete piraeus operator manifests"
   kubectl delete -k "https://github.com/piraeusdatastore/piraeus-operator/config/default?ref=v${PIRAEUS_OPERATOR_VERSION}" >/dev/null 2>&1 || true
 
   info "Reset complete (best-effort)."
-  info "If namespace is still Terminating, check: kubectl get ns piraeus-datastore -o yaml"
 }
 
 # -----------------------------
-# Entry points
+# Terraform entry points
 # -----------------------------
+cmd_plan() {
+  need terraform
+  step "terraform plan"
+  terraform init -upgrade
+  terraform plan -out "$TFPLAN_OUT"
+  info "Plan saved to: $TFPLAN_OUT"
+}
+
+terraform_apply_internal() {
+  # Applies either from a plan file, or direct.
+  if [[ "$SKIP_PLAN" == "1" ]]; then
+    terraform apply -auto-approve
+  else
+    # Ensure we have a plan file.
+    if [[ ! -f "$TFPLAN_OUT" ]]; then
+      terraform plan -out "$TFPLAN_OUT"
+    fi
+    terraform apply -auto-approve "$TFPLAN_OUT"
+  fi
+}
+
 cmd_apply() {
   need terraform
   need kubectl
   need curl
 
   if [[ "$SKIP_TERRAFORM" != "1" ]]; then
+    if [[ "$SKIP_PLAN" != "1" ]]; then
+      step "terraform plan"
+      terraform init -upgrade
+      terraform plan -out "$TFPLAN_OUT"
+    else
+      step "terraform plan (skipped)"
+      terraform init -upgrade
+    fi
+
     step "terraform apply"
-    terraform init -upgrade
-    terraform apply -auto-approve
+    terraform_apply_internal
   else
-    step "terraform apply (skipped)"
+    step "terraform (skipped)"
   fi
 
-  load_cluster_vars
+  load_cluster_vars_strict
   write_configs
 
   step "talosctl health"
   need talosctl
-  talosctl -n "${CONTROLLERS[0]}" health --wait-timeout 10m
+  ensure_talosconfig
+
+  # Health across all nodes for stability
+  local all_nodes
+  all_nodes="$(printf '%s\n' "${CONTROLLERS[@]}" "${WORKERS[@]}" | paste -sd, -)"
+  talosctl -n "$all_nodes" health --wait-timeout 15m
 
   step "kubectl cluster-info"
   kubectl cluster-info
@@ -646,6 +700,11 @@ cmd_apply() {
   info "If you use Lens, import: $KUBECONFIG_LENS_OUT"
 }
 
+cmd_plan_apply() {
+  # Explicit command for folks used to the old flow.
+  cmd_apply
+}
+
 cmd_destroy() {
   need terraform
   step "terraform destroy"
@@ -653,12 +712,93 @@ cmd_destroy() {
   info "NOTE: Terraform destroy does NOT wipe data disks inside VMs. If you re-create nodes with the same disks, you may want WIPE_DISKS=1 on next apply."
 }
 
+# -----------------------------
+# reset-all
+# -----------------------------
+local_cleanup() {
+  [[ "$RESET_LOCAL" == "1" ]] || return 0
+
+  step "local cleanup"
+
+  rm -f "$TFPLAN_OUT" >/dev/null 2>&1 || true
+  rm -f "$KUBECONFIG_OUT" "$KUBECONFIG_LENS_OUT" "$TALOSCONFIG_OUT" "$INGRESS_CA_OUT" >/dev/null 2>&1 || true
+
+  info "Removed: tfplan + generated kubeconfig/talosconfig (+ ingress CA if present)"
+
+  if [[ "$NUKE_TERRAFORM_DIR" == "1" ]]; then
+    warn "NUKE_TERRAFORM_DIR=1: removing .terraform/ and crash logs (best-effort)"
+    rm -rf .terraform >/dev/null 2>&1 || true
+    rm -f .terraform.lock.hcl crash.log terraform.log >/dev/null 2>&1 || true
+  fi
+
+  if [[ "$NUKE_STATE" == "1" ]]; then
+    warn "NUKE_STATE=1: removing terraform state files (terraform.tfstate*)"
+    rm -f terraform.tfstate terraform.tfstate.backup terraform.tfstate.* >/dev/null 2>&1 || true
+  fi
+}
+
+cmd_reset_all() {
+  step "reset-all"
+
+  # Best-effort: reset piraeus first (if kubeconfig exists)
+  (
+    set +e
+    if command -v kubectl >/dev/null 2>&1; then
+      ./"$(basename "$0")" reset-piraeus
+    fi
+    exit 0
+  ) || true
+
+  # Optional: wipe disks before tearing down VMs
+  if [[ "$WIPE_DISKS" == "1" ]]; then
+    (
+      set +e
+      need talosctl
+      ensure_talosconfig
+      wipe_worker_disks
+      exit 0
+    ) || true
+  fi
+
+  # Terraform destroy
+  if [[ "$SKIP_TERRAFORM" != "1" ]]; then
+    (
+      set +e
+      if command -v terraform >/dev/null 2>&1; then
+        step "terraform destroy"
+        terraform destroy -auto-approve
+      fi
+      exit 0
+    ) || true
+  else
+    warn "SKIP_TERRAFORM=1: terraform destroy skipped"
+  fi
+
+  # Local cleanup
+  local_cleanup
+
+  step "reset-all done"
+}
+
 usage() {
   cat <<USAGE
 Usage:
+  $0 plan
   $0 apply
+  $0 plan-apply
   $0 destroy
   $0 reset-piraeus
+  $0 reset-all
+
+Terraform flow:
+  - plan:       terraform plan -> saves to $TFPLAN_OUT
+  - apply:      default runs plan+apply (unless SKIP_PLAN=1)
+  - plan-apply: alias for apply (kept for backwards compatibility)
+
+reset-all does:
+  1) reset-piraeus (best-effort)
+  2) terraform destroy (best-effort)
+  3) local cleanup (generated kubeconfig/talosconfig/tfplan)
 
 reset-piraeus env:
   RESET_LINSTOR_DB=1   Also deletes internal.linstor.linbit.com CRs (useful if migrations/rollback got stuck)
@@ -673,7 +813,13 @@ Common env overrides:
   AUTO_PLACE=1
   WIPE_DISKS=1
   SKIP_TERRAFORM=1
+  SKIP_PLAN=1
   SKIP_PIRAEUS=1
+
+reset-all cleanup knobs:
+  RESET_LOCAL=1
+  NUKE_TERRAFORM_DIR=1
+  NUKE_STATE=1
 
 Outputs:
   kubeconfig:        $KUBECONFIG_OUT
@@ -685,9 +831,12 @@ USAGE
 main() {
   local cmd="${1:-}"
   case "$cmd" in
-    apply)         cmd_apply ;;
-    destroy)       cmd_destroy ;;
+    plan)         cmd_plan ;;
+    apply)        cmd_apply ;;
+    plan-apply)   cmd_plan_apply ;;
+    destroy)      cmd_destroy ;;
     reset-piraeus) cmd_reset_piraeus ;;
+    reset-all)    cmd_reset_all ;;
     ""|-h|--help|help) usage ;;
     *) die "unknown command: $cmd" ;;
   esac
