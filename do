@@ -361,6 +361,48 @@ wipe_worker_disks() {
   done
 }
 
+prepare_lvm_volumegroups() {
+  # Create LVM volume groups on each worker node using the specified device.
+  # This must be done before Piraeus can use the storage.
+  [[ "${#WORKERS[@]}" -gt 0 ]] || return 0
+  need talosctl
+
+  step "prepare LVM volume groups on workers"
+
+  local i ip node dev
+  for i in "${!WORKERS[@]}"; do
+    ip="${WORKERS[$i]}"
+    node="${WORKER_NODE_NAMES[$i]:-worker-$i}"
+    dev="$(device_for_node "$node")"
+
+    info "Creating LVM thin pool on $node ($ip) using device $dev"
+    
+    # Create physical volume, volume group, and thin pool via talosctl
+    talosctl -n "$ip" exec -- sh -c "
+      set -e
+      # Create physical volume if not exists
+      if ! pvdisplay $dev >/dev/null 2>&1; then
+        pvcreate $dev
+      fi
+      
+      # Create volume group if not exists
+      if ! vgdisplay $POOL_NAME >/dev/null 2>&1; then
+        vgcreate $POOL_NAME $dev
+      fi
+      
+      # Create thin pool if not exists
+      if ! lvdisplay $POOL_NAME/thinpool >/dev/null 2>&1; then
+        # Use 95% of VG space for thin pool
+        lvcreate -L \$(( \$(vgs --noheadings -o vg_size --units b $POOL_NAME | tr -d ' B') * 95 / 100 )) -T $POOL_NAME/thinpool
+      fi
+      
+      echo 'LVM setup complete'
+    " || {
+      warn "Failed to create LVM setup on $node ($ip), but continuing..."
+    }
+  done
+}
+
 # -----------------------------
 # Piraeus/LINSTOR install
 # -----------------------------
@@ -434,10 +476,9 @@ spec:
             privileged: true
   storagePools:
     - name: ${POOL_NAME}
-      lvmPool:
+      lvmThinPool:
         volumeGroup: ${POOL_NAME}
-        devicePaths:
-          - ${dev}
+        thinPool: thinpool
 ---
 YAML
   done
@@ -694,6 +735,9 @@ post_apply_pipeline() {
     warn "Skipping Piraeus install/config (SKIP_PIRAEUS=1)"
     return 0
   fi
+
+  # Prepare LVM volume groups before installing Piraeus
+  prepare_lvm_volumegroups
 
   piraeus_install_operator
   piraeus_wait_operator
