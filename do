@@ -358,46 +358,44 @@ wipe_worker_disks() {
   done
 }
 
-prepare_lvm_volumegroups() {
-  # Create LVM volume groups on each worker node using the specified device.
-  # This must be done before Piraeus can use the storage.
-  [[ "${#WORKERS[@]}" -gt 0 ]] || return 0
-  need talosctl
+configure_linstor_storage_pools() {
+  # Create physical storage pools in LINSTOR after satellites are up
+  # This uses LINSTOR's API to configure the storage on each node
+  [[ "${#WORKER_NODE_NAMES[@]}" -gt 0 ]] || return 0
+  need kubectl
 
-  step "prepare LVM volume groups on workers"
+  step "configure LINSTOR storage pools via API"
 
-  local i ip node dev
-  for i in "${!WORKERS[@]}"; do
-    ip="${WORKERS[$i]}"
-    node="${WORKER_NODE_NAMES[$i]:-worker-$i}"
+  local i node dev linstor_pod
+  
+  # Find a linstor-controller pod to exec commands from
+  linstor_pod=$(kubectl -n piraeus-datastore get pod -l app.kubernetes.io/component=linstor-controller -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+  
+  if [[ -z "$linstor_pod" ]]; then
+    warn "No linstor-controller pod found, skipping storage pool configuration"
+    return 0
+  fi
+
+  for i in "${!WORKER_NODE_NAMES[@]}"; do
+    node="${WORKER_NODE_NAMES[$i]}"
     dev="$(device_for_node "$node")"
 
-    info "Creating LVM thin pool on $node ($ip) using device $dev"
+    info "Configuring storage pool on node $node with device $dev"
     
-    # Create physical volume, volume group, and thin pool via talosctl
-    talosctl -n "$ip" exec -- sh -c "
-      set -e
-      # Create physical volume if not exists
-      if ! pvdisplay $dev >/dev/null 2>&1; then
-        pvcreate $dev
-      fi
-      
-      # Create volume group if not exists
-      if ! vgdisplay $POOL_NAME >/dev/null 2>&1; then
-        vgcreate $POOL_NAME $dev
-      fi
-      
-      # Create thin pool if not exists
-      if ! lvdisplay $POOL_NAME/thinpool >/dev/null 2>&1; then
-        # Use 95% of VG space for thin pool
-        lvcreate -L \$(( \$(vgs --noheadings -o vg_size --units b $POOL_NAME | tr -d ' B') * 95 / 100 )) -T $POOL_NAME/thinpool
-      fi
-      
-      echo 'LVM setup complete'
-    " || {
-      warn "Failed to create LVM setup on $node ($ip), but continuing..."
-    }
+    # Use linstor client to create physical storage and storage pool
+    kubectl -n piraeus-datastore exec "$linstor_pod" -- linstor \
+      physical-storage create-device-pool \
+      --pool-name "${POOL_NAME}" \
+      --storage-pool "${POOL_NAME}" \
+      LVM_THIN \
+      "$node" \
+      "$dev" \
+      --wait-until-configured || {
+        warn "Failed to create storage pool on $node, may already exist or device not ready"
+      }
   done
+  
+  info "Storage pool configuration complete"
 }
 
 # -----------------------------
@@ -471,11 +469,6 @@ spec:
           image: quay.io/piraeusdatastore/drbd-reactor:v1.10.0
           securityContext:
             privileged: true
-  storagePools:
-    - name: ${POOL_NAME}
-      lvmThinPool:
-        volumeGroup: ${POOL_NAME}
-        thinPool: thinpool
 ---
 YAML
   done
@@ -733,15 +726,15 @@ post_apply_pipeline() {
     return 0
   fi
 
-  # Prepare LVM volume groups before installing Piraeus
-  prepare_lvm_volumegroups
-
   piraeus_install_operator
   piraeus_wait_operator
   piraeus_relax_webhooks
   piraeus_apply_cluster_resources
   wait_linstor_ready
   wait_satellites_ready
+  
+  # Configure storage pools via LINSTOR API after satellites are ready
+  configure_linstor_storage_pools
   storage_smoke_test
   export_ingress_ca
 
