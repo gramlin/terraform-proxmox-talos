@@ -42,6 +42,7 @@ WIPE_DISKS="${WIPE_DISKS:-0}"                  # 1 = wipe data disks on workers 
 SKIP_TERRAFORM="${SKIP_TERRAFORM:-0}"
 SKIP_PIRAEUS="${SKIP_PIRAEUS:-0}"
 RESET_LINSTOR_DB="${RESET_LINSTOR_DB:-0}"      # reset-piraeus: also delete internal.linstor.linbit.com CRs
+AUTO_RESET_LINSTOR_DB="${AUTO_RESET_LINSTOR_DB:-0}"  # auto-reset internal DB on migration failure
 
 # Timeouts
 WAIT_LINSTOR_AVAILABLE_TIMEOUT="${WAIT_LINSTOR_AVAILABLE_TIMEOUT:-15m}"
@@ -519,19 +520,46 @@ piraeus_apply_cluster_resources() {
   render_storageclass           | kubectl apply -f -
 }
 
+reset_linstor_internal_db() {
+  step "reset LINSTOR internal CRD DB (internal.linstor.linbit.com)"
+  if kubectl api-resources --api-group=internal.linstor.linbit.com -o name >/dev/null 2>&1; then
+    kubectl api-resources --api-group=internal.linstor.linbit.com -o name \
+      | xargs -r -n1 kubectl delete --all --ignore-not-found >/dev/null 2>&1 || true
+  fi
+}
+
 wait_linstor_ready() {
   step "piraeus wait datastore"
   # Wait for LinstorCluster to become Available (controller reachable).
-  if ! kubectl wait linstorcluster.piraeus.io/linstor -n piraeus-datastore --timeout="$WAIT_LINSTOR_AVAILABLE_TIMEOUT" --for=condition=Available; then
+  local attempt=1
+  while true; do
+    if kubectl wait linstorcluster.piraeus.io/linstor -n piraeus-datastore --timeout="$WAIT_LINSTOR_AVAILABLE_TIMEOUT" --for=condition=Available; then
+      info "LinstorCluster/linstor is Available."
+      return 0
+    fi
+
     warn "LinstorCluster did not become Available within timeout. Dumping diagnostics."
     kubectl -n piraeus-datastore get pods -o wide || true
     kubectl -n piraeus-datastore describe linstorcluster.piraeus.io/linstor || true
     kubectl -n piraeus-datastore get linstorcluster.piraeus.io/linstor -o yaml || true
-    kubectl -n piraeus-datastore logs -l app.kubernetes.io/component=linstor-controller --all-containers --tail=300 || true
+
+    local controller_logs
+    controller_logs="$(kubectl -n piraeus-datastore logs -l app.kubernetes.io/component=linstor-controller --all-containers --tail=300 2>/dev/null || true)"
+    [[ -n "$controller_logs" ]] && echo "$controller_logs"
     kubectl -n piraeus-datastore logs -l app.kubernetes.io/component=linstor-satellite --all-containers --tail=200 || true
+
+    if [[ "$AUTO_RESET_LINSTOR_DB" == "1" && "$attempt" -eq 1 ]]; then
+      if echo "$controller_logs" | grep -qiE 'rollback has to be done|Database initialization error|Cannot perform Migration'; then
+        warn "Detected LINSTOR DB migration failure. Resetting internal DB and retrying once."
+        reset_linstor_internal_db
+        kubectl -n piraeus-datastore delete pod -l app.kubernetes.io/component=linstor-controller --ignore-not-found >/dev/null 2>&1 || true
+        attempt=$((attempt + 1))
+        continue
+      fi
+    fi
+
     die "LinstorCluster/linstor not Available"
-  fi
-  info "LinstorCluster/linstor is Available."
+  done
 }
 
 wait_satellites_ready() {
@@ -645,11 +673,7 @@ cmd_reset_piraeus() {
   kubectl delete linstorsatelliteconfigurations.piraeus.io --all --ignore-not-found >/dev/null 2>&1 || true
 
   if [[ "$RESET_LINSTOR_DB" == "1" ]]; then
-    step "reset LINSTOR internal CRD DB (internal.linstor.linbit.com)"
-    if kubectl api-resources --api-group=internal.linstor.linbit.com -o name >/dev/null 2>&1; then
-      kubectl api-resources --api-group=internal.linstor.linbit.com -o name \
-        | xargs -r -n1 kubectl delete --all --ignore-not-found >/dev/null 2>&1 || true
-    fi
+    reset_linstor_internal_db
   fi
 
   # Delete namespace
