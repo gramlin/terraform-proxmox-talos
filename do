@@ -489,15 +489,17 @@ test_storage_pools_created() {
   
   local pool_count pool_output
   pool_output=$(kubectl -n piraeus-datastore exec "$controller_pod" -- linstor storage-pool list 2>/dev/null || echo "")
-  pool_count=$(echo "$pool_output" | grep -c "lvm" || echo "0")
+  # Use tr to remove any newlines, then grep -c to count matches
+  pool_count=$(echo "$pool_output" | grep -i "lvm" | wc -l | tr -d ' \n')
   
   if [[ $pool_count -gt 0 ]]; then
-    info "  ✓ Found $pool_count storage pools"
+    info "  ✓ Found $pool_count LVM storage pools"
     echo "$pool_output"
     return 0
   else
-    warn "  ⚠ No storage pools found"
-    info "  Pool output: $pool_output"
+    warn "  ⚠ No LVM storage pools found (only diskless pools exist)"
+    info "  This means configure_linstor_storage_pools hasn't created LVM pools yet"
+    echo "$pool_output" | head -20
     return 1
   fi
 }
@@ -568,6 +570,12 @@ run_all_tests() {
   if [[ ${#WORKERS[@]} -eq 0 ]] && [[ ${#WORKER_NODE_NAMES[@]} -eq 0 ]]; then
     info "Loading cluster variables from terraform..."
     load_cluster_vars 2>/dev/null || warn "Could not load cluster vars (continuing anyway)"
+  fi
+  
+  # Ensure kubeconfig is set for standalone test runs
+  if [[ -z "${KUBECONFIG:-}" ]] && [[ -f "${KUBECONFIG_OUT:-$WORKDIR/kubeconfig.yml}" ]]; then
+    export KUBECONFIG="${KUBECONFIG_OUT:-$WORKDIR/kubeconfig.yml}"
+    info "Using kubeconfig: $KUBECONFIG"
   fi
   
   local failed=0
