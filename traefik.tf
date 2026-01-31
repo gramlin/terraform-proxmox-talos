@@ -167,10 +167,18 @@ data "helm_template" "traefik" {
 }
 
 # Kustomize the Traefik manifests
+# see https://registry.terraform.io/providers/rgl/kustomizer/latest/docs/data-sources/manifest
 data "kustomizer_manifest" "traefik" {
-  manifests = [
-    data.helm_template.traefik.manifest,
-  ]
+  files = {
+    "kustomization.yaml" = <<-EOF
+      apiVersion: kustomize.config.k8s.io/v1beta1
+      kind: Kustomization
+      namespace: ${yamlencode(local.traefik_namespace)}
+      resources:
+        - resources/resources.yaml
+      EOF
+    "resources/resources.yaml" = data.helm_template.traefik.manifest
+  }
 }
 
 output "traefik_manifest" {
