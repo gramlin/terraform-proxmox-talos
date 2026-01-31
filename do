@@ -638,6 +638,50 @@ configure_linstor_storage_pools() {
   info "=== LINSTOR Storage Pool Configuration Debug ==="
   info "Controller pod: $linstor_pod"
   
+  # Wait for LVM init DaemonSet to complete
+  info "Waiting for LVM init DaemonSet to complete..."
+  local timeout=120
+  local elapsed=0
+  local ready
+  while [[ $elapsed -lt $timeout ]]; do
+    ready=$(kubectl get daemonset -n piraeus-datastore lvm-init -o jsonpath='{.status.numberReady}' 2>/dev/null || echo "0")
+    local desired=$(kubectl get daemonset -n piraeus-datastore lvm-init -o jsonpath='{.status.desiredNumberScheduled}' 2>/dev/null || echo "0")
+    
+    if [[ "$ready" -eq "$desired" ]] && [[ "$desired" -gt 0 ]]; then
+      info "✓ LVM init DaemonSet ready ($ready/$desired pods)"
+      break
+    fi
+    
+    if [[ $((elapsed % 10)) -eq 0 ]]; then
+      info "  Waiting for LVM init: $ready/$desired ready (${elapsed}s elapsed)..."
+      kubectl get pods -n piraeus-datastore -l app=lvm-init -o wide 2>/dev/null || true
+    fi
+    
+    sleep 2
+    elapsed=$((elapsed + 2))
+  done
+  
+  if [[ $elapsed -ge $timeout ]]; then
+    warn "LVM init DaemonSet did not become ready within ${timeout}s"
+    warn "Showing LVM init pod logs for troubleshooting:"
+    kubectl logs -n piraeus-datastore -l app=lvm-init --tail=100 2>&1 || true
+    warn "Continuing anyway, but storage pool creation may fail..."
+  fi
+  
+  # Delete any existing broken storage pools
+  info "Cleaning up any existing broken storage pools..."
+  local existing_pools
+  existing_pools=$(kubectl -n piraeus-datastore exec "$linstor_pod" -- linstor storage-pool list -p 2>/dev/null | grep -E "^\|.*${POOL_NAME}" | awk -F'|' '{print $2 ":" $3}' | tr -d ' ' || echo "")
+  
+  if [[ -n "$existing_pools" ]]; then
+    while IFS=: read -r pool_name node_name; do
+      if [[ -n "$pool_name" && -n "$node_name" ]]; then
+        info "  Deleting existing pool '$pool_name' on node '$node_name'"
+        kubectl -n piraeus-datastore exec "$linstor_pod" -- linstor storage-pool delete "$node_name" "$pool_name" 2>&1 || true
+      fi
+    done <<< "$existing_pools"
+  fi
+  
   # Debug: Check nodes are registered
   info "DEBUG: Registered LINSTOR nodes..."
   kubectl -n piraeus-datastore exec "$linstor_pod" -- linstor node list 2>&1 | tee /tmp/linstor-nodes.log || true
@@ -939,7 +983,7 @@ spec:
                 echo "✓ PV already exists on $DEVICE"
               else
                 echo "Creating PV on $DEVICE..."
-                pvcreate -f --override -y "$DEVICE"
+                pvcreate -ff -y "$DEVICE"
                 echo "✓ PV created"
               fi
               
