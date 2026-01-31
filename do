@@ -22,21 +22,26 @@ set -euo pipefail
 WORKDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Piraeus versions - tested combinations for Talos:
-#   PIRAEUS_OPERATOR_VERSION=2.9.0 + LINSTOR_IMAGE_VERSION=1.28.0 (stable)
-#   PIRAEUS_OPERATOR_VERSION=2.10.4 + LINSTOR_IMAGE_VERSION=1.32.3 (latest, may have issues)
+#   PIRAEUS_OPERATOR_VERSION=2.9.0 + LINSTOR_IMAGE_VERSION=v1.28.0 (stable)
+#   PIRAEUS_OPERATOR_VERSION=2.10.4 + LINSTOR_IMAGE_VERSION=v1.32.3 (latest)
 #
 # Version fallback: if not explicitly set, will try multiple versions automatically
 if [[ -z "${PIRAEUS_OPERATOR_VERSION:-}" && -z "${LINSTOR_IMAGE_VERSION:-}" ]]; then
   PIRAEUS_VERSION_FALLBACK_ENABLED=1
-  # Versions to try (operator:linstor pairs)
-  PIRAEUS_VERSION_CANDIDATES=("2.10.4:1.32.3" "2.9.0:1.28.0" "2.8.0:1.27.1")
+  # Versions to try (operator:linstor pairs) - note 'v' prefix required for linstor tags
+  PIRAEUS_VERSION_CANDIDATES=("2.10.4:v1.32.3" "2.9.0:v1.28.0" "2.8.0:v1.27.1")
   CURRENT_VERSION_INDEX=0
 else
   PIRAEUS_VERSION_FALLBACK_ENABLED=0
 fi
 
 PIRAEUS_OPERATOR_VERSION="${PIRAEUS_OPERATOR_VERSION:-2.10.4}"
-LINSTOR_IMAGE_VERSION="${LINSTOR_IMAGE_VERSION:-1.32.3}"
+LINSTOR_IMAGE_VERSION="${LINSTOR_IMAGE_VERSION:-v1.32.3}"
+
+# Ensure LINSTOR version has 'v' prefix (required by quay.io tags)
+if [[ ! "${LINSTOR_IMAGE_VERSION}" =~ ^v ]]; then
+  LINSTOR_IMAGE_VERSION="v${LINSTOR_IMAGE_VERSION}"
+fi
 
 POOL_NAME="${POOL_NAME:-lvm}"
 STORAGECLASS_NAME="${STORAGECLASS_NAME:-linstor-lvm-r1}"
@@ -416,6 +421,40 @@ configure_linstor_storage_pools() {
 # -----------------------------
 # Piraeus/LINSTOR install
 # -----------------------------
+check_cluster_network_access() {
+  step "verify cluster internet access"
+  
+  info "Testing if cluster can reach quay.io (required for pulling Piraeus images)..."
+  
+  # Create a test pod that attempts to reach quay.io
+  kubectl run network-test --image=busybox:1.36 --restart=Never --rm -i --timeout=60s -- \
+    sh -c 'wget -T 10 -O- https://quay.io 2>&1 | head -20' 2>&1 | tee /tmp/network-test.log || true
+  
+  if grep -qi "connected\|200 OK\|301\|302" /tmp/network-test.log 2>/dev/null; then
+    info "✓ Cluster has internet access to quay.io"
+    return 0
+  else
+    warn "✗ Cluster CANNOT reach quay.io!"
+    warn ""
+    warn "Your Talos cluster appears to have no internet access or cannot reach quay.io."
+    warn "This will cause ImagePullBackOff errors when trying to install Piraeus."
+    warn ""
+    warn "Common causes:"
+    warn "  1. Talos nodes have no default gateway configured"
+    warn "  2. Proxmox firewall is blocking outbound traffic"
+    warn "  3. No DNS configured (can't resolve quay.io)"
+    warn "  4. Network isolation in Proxmox"
+    warn ""
+    warn "Quick tests to run:"
+    warn "  - kubectl run -it --rm debug --image=busybox --restart=Never -- ping -c 3 8.8.8.8"
+    warn "  - kubectl run -it --rm debug --image=busybox --restart=Never -- nslookup quay.io"
+    warn "  - talosctl -n <node-ip> get addresses  # Check if nodes have external network"
+    warn ""
+    warn "Continuing anyway, but installation will likely fail..."
+    return 1
+  fi
+}
+
 piraeus_install_operator() {
   need kubectl
   step "piraeus install"
@@ -869,6 +908,9 @@ post_apply_pipeline() {
     warn "Skipping Piraeus install/config (SKIP_PIRAEUS=1)"
     return 0
   fi
+
+  # Pre-flight check: verify cluster can reach quay.io
+  check_cluster_network_access || warn "Network check failed, but continuing..."
 
   piraeus_install_operator
   piraeus_wait_operator
