@@ -407,7 +407,7 @@ configure_linstor_storage_pools() {
       physical-storage create-device-pool \
       --pool-name "${POOL_NAME}" \
       --storage-pool "${POOL_NAME}" \
-      LVM_THIN \
+      lvmthin \
       "$node" \
       "$dev" \
       --wait-until-configured || {
