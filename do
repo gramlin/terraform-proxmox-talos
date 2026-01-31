@@ -1351,10 +1351,11 @@ post_apply_pipeline() {
 
   piraeus_install_operator
   piraeus_wait_operator
-  test_lvm_init_daemonset
   
   piraeus_relax_webhooks
   piraeus_apply_cluster_resources
+  test_lvm_init_daemonset
+  
   wait_linstor_ready
   wait_satellites_ready
   test_satellite_readiness
