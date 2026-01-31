@@ -415,12 +415,15 @@ test_satellite_readiness() {
   # Verify satellites are Running and Ready
   step "TEST: Verify satellite pod status"
   
-  local running
-  running=$(kubectl get pods -n piraeus-datastore -l app.kubernetes.io/component=linstor-satellite -o jsonpath='{range .items[?(@.status.phase=="Running")]}{.metadata.name}{"\n"}{end}' 2>/dev/null | wc -l)
-  local ready
-  ready=$(kubectl get pods -n piraeus-datastore -l app.kubernetes.io/component=linstor-satellite -o jsonpath='{range .items[?(@.status.conditions[?(@.type=="Ready")].status=="True")]}{.metadata.name}{"\n"}{end}' 2>/dev/null | wc -l)
-  local total
-  total=$(kubectl get pods -n piraeus-datastore -l app.kubernetes.io/component=linstor-satellite --no-headers 2>/dev/null | wc -l)
+  local total running ready
+  total=$(kubectl get pods -n piraeus-datastore -l app.kubernetes.io/component=linstor-satellite --no-headers 2>/dev/null | wc -l | tr -d ' ')
+  running=$(kubectl get pods -n piraeus-datastore -l app.kubernetes.io/component=linstor-satellite --no-headers 2>/dev/null | grep -c "Running" || echo "0")
+  ready=$(kubectl get pods -n piraeus-datastore -l app.kubernetes.io/component=linstor-satellite -o json 2>/dev/null | jq -r '[.items[] | select(.status.conditions[] | select(.type=="Ready" and .status=="True"))] | length' || echo "0")
+  
+  if [[ $total -eq 0 ]]; then
+    warn "  ⚠ No satellite pods found"
+    return 1
+  fi
   
   if [[ $running -eq $total ]]; then
     info "  ✓ All $total satellites Running"
@@ -428,7 +431,7 @@ test_satellite_readiness() {
     warn "  ⚠ Only $running/$total satellites Running"
   fi
   
-  if [[ $ready -eq $total ]]; then
+  if [[ $ready -eq $total ]] && [[ $total -gt 0 ]]; then
     info "  ✓ All $total satellites Ready"
     return 0
   else
@@ -451,14 +454,23 @@ test_linstor_nodes_registered() {
   
   local registered_nodes
   registered_nodes=$(kubectl -n piraeus-datastore exec "$controller_pod" -- linstor node list 2>/dev/null | grep -c "SATELLITE" || echo "0")
-  local expected_nodes=${#WORKER_NODE_NAMES[@]}
   
-  if [[ $registered_nodes -eq $expected_nodes ]]; then
+  # Use satellite pod count as expected if WORKER_NODE_NAMES not available
+  local expected_nodes=${#WORKER_NODE_NAMES[@]}
+  if [[ $expected_nodes -eq 0 ]]; then
+    expected_nodes=$(kubectl get pods -n piraeus-datastore -l app.kubernetes.io/component=linstor-satellite --no-headers 2>/dev/null | wc -l | tr -d ' ')
+  fi
+  
+  if [[ $registered_nodes -gt 0 ]] && [[ $registered_nodes -eq $expected_nodes ]]; then
     info "  ✓ All $registered_nodes nodes registered"
     kubectl -n piraeus-datastore exec "$controller_pod" -- linstor node list 2>/dev/null | head -10
     return 0
+  elif [[ $registered_nodes -gt 0 ]]; then
+    warn "  ⚠ $registered_nodes nodes registered (expected $expected_nodes)"
+    kubectl -n piraeus-datastore exec "$controller_pod" -- linstor node list 2>/dev/null | head -10
+    return 1
   else
-    warn "  ⚠ Only $registered_nodes/$expected_nodes nodes registered"
+    warn "  ⚠ No nodes registered yet"
     return 1
   fi
 }
@@ -475,15 +487,17 @@ test_storage_pools_created() {
     return 1
   fi
   
-  local pool_count
-  pool_count=$(kubectl -n piraeus-datastore exec "$controller_pod" -- linstor storage-pool list 2>/dev/null | grep -c "lvm" || echo "0")
+  local pool_count pool_output
+  pool_output=$(kubectl -n piraeus-datastore exec "$controller_pod" -- linstor storage-pool list 2>/dev/null || echo "")
+  pool_count=$(echo "$pool_output" | grep -c "lvm" || echo "0")
   
   if [[ $pool_count -gt 0 ]]; then
     info "  ✓ Found $pool_count storage pools"
-    kubectl -n piraeus-datastore exec "$controller_pod" -- linstor storage-pool list 2>/dev/null
+    echo "$pool_output"
     return 0
   else
     warn "  ⚠ No storage pools found"
+    info "  Pool output: $pool_output"
     return 1
   fi
 }
@@ -516,14 +530,30 @@ EOF
     return 1
   fi
   
-  # Wait for binding
+  sleep 2
+  
+  # Check if it's WaitForFirstConsumer
+  local pvc_phase pvc_status
+  pvc_phase=$(kubectl get pvc -n "$test_ns" "$test_pvc" -o jsonpath='{.status.phase}' 2>/dev/null || echo "Unknown")
+  
+  if [[ "$pvc_phase" == "Pending" ]]; then
+    # Check if waiting for first consumer (expected for topology-aware storage)
+    if kubectl describe pvc -n "$test_ns" "$test_pvc" 2>/dev/null | grep -q "WaitForFirstConsumer"; then
+      info "  ✓ PVC created (Pending - WaitForFirstConsumer is expected)"
+      info "    This StorageClass waits for a pod to consume the PVC before binding"
+      kubectl delete pvc -n "$test_ns" "$test_pvc" --ignore-not-found=true
+      return 0
+    fi
+  fi
+  
+  # Wait for binding (for immediate binding mode)
   if kubectl wait -n "$test_ns" pvc "$test_pvc" --for=jsonpath='{.status.phase}'=Bound --timeout=30s 2>/dev/null; then
     info "  ✓ PVC bound successfully"
     kubectl get pvc -n "$test_ns" "$test_pvc"
     kubectl delete pvc -n "$test_ns" "$test_pvc" --ignore-not-found=true
     return 0
   else
-    warn "  ⚠ PVC failed to bind within 30s"
+    warn "  ⚠ PVC did not bind within 30s"
     kubectl describe pvc -n "$test_ns" "$test_pvc" 2>/dev/null | grep -A 5 "Events:" || true
     kubectl delete pvc -n "$test_ns" "$test_pvc" --ignore-not-found=true
     return 1
@@ -533,6 +563,12 @@ EOF
 run_all_tests() {
   # Run all validation tests
   step "Running comprehensive validation tests"
+  
+  # Load cluster vars if not already loaded (for standalone test runs)
+  if [[ ${#WORKERS[@]} -eq 0 ]] && [[ ${#WORKER_NODE_NAMES[@]} -eq 0 ]]; then
+    info "Loading cluster variables from terraform..."
+    load_cluster_vars 2>/dev/null || warn "Could not load cluster vars (continuing anyway)"
+  fi
   
   local failed=0
   
