@@ -947,7 +947,7 @@ spec:
               set -e
               DEVICE="/dev/sdb"
               VG_NAME="linstor-vg"
-              POOL_NAME="linstor-thinpool"
+              POOL_NAME="lvm"
               HOSTNAME=$(hostname)
               
               echo "=========================================="
