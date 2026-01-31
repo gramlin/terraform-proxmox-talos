@@ -1002,8 +1002,8 @@ spec:
               if lvdisplay "$VG_NAME/$POOL_NAME" >/dev/null 2>&1; then
                 echo "✓ Thin pool $VG_NAME/$POOL_NAME already exists"
               else
-                echo "Creating thin pool $VG_NAME/$POOL_NAME (100G)..."
-                if lvcreate -L 100G -T "$VG_NAME/$POOL_NAME" 2>&1; then
+                echo "Creating thin pool $VG_NAME/$POOL_NAME (using 100% of VG)..."
+                if lvcreate -l 100%FREE -T "$VG_NAME/$POOL_NAME" 2>&1; then
                   echo "✓ Thin pool created successfully"
                 else
                   echo "ERROR: Failed to create thin pool"
