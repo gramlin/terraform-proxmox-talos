@@ -883,8 +883,13 @@ spec:
       priorityClassName: system-node-critical
       tolerations:
         - operator: Exists
-      nodeSelector:
-        node-role.kubernetes.io/worker: ""
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: node-role.kubernetes.io/control-plane
+                    operator: DoesNotExist
       containers:
         - name: lvm-init
           image: alpine:latest
