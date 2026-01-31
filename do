@@ -409,8 +409,7 @@ configure_linstor_storage_pools() {
       --storage-pool "${POOL_NAME}" \
       lvmthin \
       "$node" \
-      "$dev" \
-      --wait-until-configured || {
+      "$dev" || {
         warn "Failed to create storage pool on $node, may already exist or device not ready"
       }
   done
