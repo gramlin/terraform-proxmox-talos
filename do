@@ -400,16 +400,12 @@ configure_linstor_storage_pools() {
     node="${WORKER_NODE_NAMES[$i]}"
     dev="$(device_for_node "$node")"
 
-    info "Configuring storage pool on node $node with device $dev"
+    info "Configuring storage pool on node $node"
     
-    # Use linstor client to create physical storage and storage pool
+    # Create storage pool using the thin pool created by lvm-init init container
+    # Format: linstor storage-pool create <provider> <node> <pool-name> <thin-pool-path>
     kubectl -n piraeus-datastore exec "$linstor_pod" -- linstor \
-      physical-storage create-device-pool \
-      --pool-name "${POOL_NAME}" \
-      --storage-pool "${POOL_NAME}" \
-      lvmthin \
-      "$node" \
-      "$dev" || {
+      storage-pool create lvmthin "$node" "${POOL_NAME}" "linstor-vg/${POOL_NAME}" || {
         warn "Failed to create storage pool on $node, may already exist or device not ready"
       }
   done
@@ -484,12 +480,14 @@ piraeus_relax_webhooks() {
 }
 
 render_storage_pool_configs() {
-  # Talos-specific satellite configuration
+  # Talos-specific satellite configuration with LVM initialization
   # Based on official docs: https://piraeus.io/docs/stable/how-to/talos/
   # 
   # Talos doesn't use systemd, so we need to remove systemd-related volumes
   # and init containers. DRBD modules are already loaded from Talos system
   # extension, so module loaders are not needed.
+  #
+  # We add an init container to prepare LVM thin pool on the device.
   
   cat <<'YAML'
 apiVersion: piraeus.io/v1
@@ -504,6 +502,52 @@ spec:
           $patch: delete
         - name: drbd-module-loader
           $patch: delete
+        - name: lvm-init
+          image: quay.io/piraeusdatastore/piraeus-server:v1.32.3
+          securityContext:
+            privileged: true
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -e
+              DEVICE="/dev/sdb"
+              VG_NAME="linstor-vg"
+              POOL_NAME="linstor-thinpool"
+              
+              if [ ! -b "$DEVICE" ]; then
+                echo "Device $DEVICE not found, skipping LVM initialization"
+                exit 0
+              fi
+              
+              # Check if PV already exists
+              if pvs "$DEVICE" 2>/dev/null; then
+                echo "PV already exists on $DEVICE, skipping initialization"
+                exit 0
+              fi
+              
+              echo "Initializing LVM on $DEVICE..."
+              pvcreate -f "$DEVICE" || true
+              
+              if vgdisplay "$VG_NAME" 2>/dev/null; then
+                echo "VG $VG_NAME already exists"
+              else
+                echo "Creating VG $VG_NAME..."
+                vgcreate "$VG_NAME" "$DEVICE"
+              fi
+              
+              if lvdisplay "$VG_NAME/$POOL_NAME" 2>/dev/null; then
+                echo "Thin pool $VG_NAME/$POOL_NAME already exists"
+              else
+                echo "Creating thin pool $VG_NAME/$POOL_NAME..."
+                lvcreate -L 100G -T "$VG_NAME/$POOL_NAME"
+              fi
+              
+              echo "LVM initialization complete"
+          volumeMounts:
+            - name: host-dev
+              mountPath: /dev
+              mountPropagation: Bidirectional
       volumes:
         - name: run-systemd-system
           $patch: delete
@@ -515,6 +559,10 @@ spec:
           $patch: delete
         - name: usr-src
           $patch: delete
+        - name: host-dev
+          hostPath:
+            path: /dev
+            type: Directory
         - name: etc-lvm-backup
           hostPath:
             path: /var/etc/lvm/backup
