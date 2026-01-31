@@ -4,7 +4,7 @@
 #    or: eval "$(./load-config.sh)"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
-WORKDIR="${SCRIPT_DIR}/tmp/output"
+WORKDIR="${SCRIPT_DIR}"
 
 KUBECONFIG_FILE="${WORKDIR}/kubeconfig.yml"
 TALOSCONFIG_FILE="${WORKDIR}/talosconfig.yml"
