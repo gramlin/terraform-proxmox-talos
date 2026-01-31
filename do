@@ -999,13 +999,23 @@ spec:
               
               # Check/create thin pool
               echo "Checking for thin pool $VG_NAME/$POOL_NAME..."
-              if lvdisplay "$VG_NAME/$POOL_NAME" 2>&1; then
+              if lvdisplay "$VG_NAME/$POOL_NAME" >/dev/null 2>&1; then
                 echo "✓ Thin pool $VG_NAME/$POOL_NAME already exists"
               else
                 echo "Creating thin pool $VG_NAME/$POOL_NAME (100G)..."
-                lvcreate -L 100G -T "$VG_NAME/$POOL_NAME"
-                echo "✓ Thin pool created"
+                if lvcreate -L 100G -T "$VG_NAME/$POOL_NAME" 2>&1; then
+                  echo "✓ Thin pool created successfully"
+                else
+                  echo "ERROR: Failed to create thin pool"
+                  echo "Attempting to check if it exists anyway..."
+                  lvs "$VG_NAME" || true
+                  exit 1
+                fi
               fi
+              
+              # Ensure thin pool is active
+              echo "Activating thin pool..."
+              lvchange -ay "$VG_NAME/$POOL_NAME" 2>&1 || echo "Thin pool already active or activation not needed"
               
               echo "=========================================="
               echo "LVM Init: Complete on $HOSTNAME"

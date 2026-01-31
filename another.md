@@ -1,5 +1,92 @@
 # Agent Instructions
 
+## Talos Image med DRBD/LVM Support
+
+### Nedladdning och Konvertering av Talos Image
+
+För att få Talos att fungera med Piraeus/LINSTOR behövs en custom image med DRBD kernel-moduler.
+
+#### 1. Ladda ner Talos Image Factory image
+
+```bash
+# Välj Talos-version (exempel: v1.8.4)
+TALOS_VERSION="v1.8.4"
+
+# Image Factory URL med DRBD och LVM extensions
+IMAGE_URL="https://factory.talos.dev/image/ce4c980550dd2ab1b17bbf2b08801c7eb59418eafe8f279833297925d67c7515/${TALOS_VERSION}/nocloud-amd64.raw.xz"
+
+# Ladda ner
+wget -O talos-${TALOS_VERSION}-drbd.raw.xz "$IMAGE_URL"
+```
+
+#### 2. Packa upp och konvertera till qcow2
+
+```bash
+# Packa upp xz-arkivet
+unxz talos-${TALOS_VERSION}-drbd.raw.xz
+
+# Konvertera RAW till QCOW2 format
+qemu-img convert -f raw -O qcow2 \
+  talos-${TALOS_VERSION}-drbd.raw \
+  talos-${TALOS_VERSION}-drbd.qcow2
+
+# Optimera qcow2-filen (komprimera)
+qemu-img convert -f qcow2 -O qcow2 -c \
+  talos-${TALOS_VERSION}-drbd.qcow2 \
+  talos-${TALOS_VERSION}-drbd-compressed.qcow2
+
+# Ta bort temporära filer
+rm talos-${TALOS_VERSION}-drbd.raw
+mv talos-${TALOS_VERSION}-drbd-compressed.qcow2 talos-${TALOS_VERSION}-drbd.qcow2
+```
+
+#### 3. Ladda upp till Proxmox
+
+```bash
+# SCP till Proxmox-server
+scp talos-${TALOS_VERSION}-drbd.qcow2 root@proxmox-host:/var/lib/vz/template/iso/
+
+# Eller via Proxmox CLI direkt
+qm importdisk <VM_ID> talos-${TALOS_VERSION}-drbd.qcow2 <storage-name>
+```
+
+#### 4. Vilka Extensions ingår i denna image?
+
+Image Factory URL:en `ce4c980550dd2ab1b17bbf2b08801c7eb59418eafe8f279833297925d67c7515` innehåller:
+
+- **siderolabs/drbd** - DRBD kernel modules för replikerad storage
+- **siderolabs/iscsi-tools** - iSCSI support (används av vissa storage drivers)
+- **siderolabs/util-linux-tools** - Verktyg som lsblk, blkid, etc.
+
+#### 5. Verifiera DRBD-moduler efter boot
+
+```bash
+# SSH till en Talos-nod (via talosctl)
+talosctl -n <NODE_IP> read /proc/modules | grep drbd
+
+# Förväntat resultat:
+# drbd_transport_tcp 32768 0 - Live 0x0000000000000000 (O)
+# drbd 901120 1 drbd_transport_tcp, Live 0x0000000000000000 (O)
+```
+
+#### 6. Alternativ: Bygg egen image via Talos Image Factory
+
+Om du vill anpassa vilka extensions som ingår:
+
+1. Gå till https://factory.talos.dev/
+2. Välj Talos-version
+3. Välj extensions:
+   - `siderolabs/drbd`
+   - `siderolabs/iscsi-tools` (optional)
+   - `siderolabs/util-linux-tools` (optional)
+4. Välj platform: `nocloud` (för Proxmox/KVM)
+5. Välj architecture: `amd64`
+6. Kopiera den genererade download-länken
+
+**Notering:** Image Factory ID:t (`ce4c9805...`) är unikt för kombinationen av extensions. Om du ändrar extensions får du ett nytt ID.
+
+---
+
 ## Issue: Satellites stuck in Init:0/4 - talos-loader container blocked
 
 The satellite pods are stuck with `talos-loader` init container in `PodInitializing` state.
@@ -101,13 +188,15 @@ hostPath type check failed: /run/systemd/system/ is not a directory
 **This is a known Talos incompatibility with LINSTOR satellites.**
 
 **Important:** This is a DIFFERENT issue from DRBD modules:
+
 - ✅ **DRBD modules** - Working! Custom Talos image with DRBD extension provides kernel modules
 - ⚠️ **Systemd directories** - LINSTOR satellites expect `/run/systemd/system/` (standard Linux), but Talos uses minimal init system without full systemd paths
 - The DRBD extension only adds kernel modules, not systemd directory structure
 
 **Timeline:**
+
 - Force-delete: Instant
-- Pod recreation: ~5 seconds  
+- Pod recreation: ~5 seconds
 - Satellites reaching Running state: 2-10 minutes (with several restart attempts)
 
 **Solution:** The `do` script has logic to handle this - it force-deletes stuck satellites and lets the DaemonSet recreate them. Check lines 724-770 in the script for the satellite restart logic.
