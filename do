@@ -1438,7 +1438,7 @@ cmd_reset_all() {
 # Traefik Ingress Controller
 # -----------------------------
 
-TRAEFIK_VERSION="${TRAEFIK_VERSION:-34.4.1}"
+TRAEFIK_VERSION="${TRAEFIK_VERSION:-33.2.1}"
 TRAEFIK_NAMESPACE="${TRAEFIK_NAMESPACE:-traefik}"
 TRAEFIK_LB_IP="${TRAEFIK_LB_IP:-192.168.190.130}"
 
@@ -1832,7 +1832,7 @@ Common env overrides:
   AUTO_PLACE=1
 
   # Traefik
-  TRAEFIK_VERSION=34.4.1
+  TRAEFIK_VERSION=33.2.1
   TRAEFIK_LB_IP=192.168.190.130
 
   # Harbor

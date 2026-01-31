@@ -108,7 +108,7 @@ The `do` script is the main deployment tool that handles everything from Terrafo
    - Runs storage smoke tests
 
 4. **Traefik Ingress Controller**
-   - Installs Traefik via Helm (v34.4.1)
+   - Installs Traefik via Helm (v33.2.1)
    - Configures LoadBalancer with Cilium L2 announcement
    - Enables HTTP→HTTPS redirect
    - Sets up Kubernetes Ingress and CRD providers
@@ -145,7 +145,7 @@ AUTO_PLACE=1                       # Number of replicas
 #### Traefik Configuration
 
 ```bash
-TRAEFIK_VERSION=34.4.1             # Traefik Helm chart version
+TRAEFIK_VERSION=33.2.1             # Traefik Helm chart version (v33.x, not v34+ which changed redirectTo syntax)
 TRAEFIK_LB_IP=192.168.190.130      # LoadBalancer IP (Cilium L2)
 TRAEFIK_NAMESPACE=traefik          # Kubernetes namespace
 ```
@@ -911,7 +911,7 @@ GITHUB_COM_TOKEN='YOUR_TOKEN' ./renovate.sh
 | Talos Linux           | 1.8.4+                 |
 | Piraeus Operator      | 2.10.4                 |
 | LINSTOR               | 1.32.3                 |
-| Traefik               | 34.4.1                 |
+| Traefik               | 33.2.1                 |
 | Harbor                | 1.16.2                 |
 | kube-prometheus-stack | 72.6.2                 |
 | Cilium                | (managed by Terraform) |

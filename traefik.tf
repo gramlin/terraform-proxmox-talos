@@ -55,7 +55,8 @@ data "helm_template" "traefik" {
   repository = "https://traefik.github.io/charts"
   chart      = "traefik"
   # renovate: datasource=helm depName=traefik registryUrl=https://traefik.github.io/charts
-  version      = "34.4.1"
+  # Using v33.x as v34+ removed redirectTo syntax in favor of middlewares
+  version      = "33.2.1"
   kube_version = var.kubernetes_version
   api_versions = []
   values = [yamlencode({
@@ -80,7 +81,7 @@ data "helm_template" "traefik" {
         expose = {
           default = true
         }
-        # Redirect HTTP to HTTPS
+        # Redirect HTTP to HTTPS (v33.x syntax)
         redirectTo = {
           port = "websecure"
         }
