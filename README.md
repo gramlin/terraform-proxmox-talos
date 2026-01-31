@@ -1,185 +1,648 @@
-# About
+# Talos Linux on Proxmox with Terraform
 
 [![Lint](https://github.com/rgl/terraform-proxmox-talos/actions/workflows/lint.yml/badge.svg)](https://github.com/rgl/terraform-proxmox-talos/actions/workflows/lint.yml)
 
-An example [Talos Linux](https://www.talos.dev) Kubernetes cluster in Proxmox QEMU/KVM Virtual Machines using terraform.
+A production-ready [Talos Linux](https://www.talos.dev) Kubernetes cluster on Proxmox QEMU/KVM using Terraform, with automated storage, ingress, and container registry setup.
 
-[Cilium](https://cilium.io) is used to augment the Networking (e.g. the [`LoadBalancer`](https://cilium.io/use-cases/load-balancer/) and [`Ingress`](https://docs.cilium.io/en/stable/network/servicemesh/ingress/) controllers), Observability (e.g. [Service Map](https://cilium.io/use-cases/service-map/)), and Security (e.g. [Network Policy](https://cilium.io/use-cases/network-policy/)).
+## Features
 
-[LVM](https://en.wikipedia.org/wiki/Logical_Volume_Manager_(Linux)), [DRBD](https://linbit.com/drbd/), [LINSTOR](https://github.com/LINBIT/linstor-server), and the [Piraeus Operator](https://github.com/piraeusdatastore/piraeus-operator), are used for providing persistent storage volumes.
+- **Kubernetes**: Talos Linux with automated cluster bootstrap
+- **CNI**: [Cilium](https://cilium.io) with L2 announcements for LoadBalancer services
+- **Storage**: [Piraeus/LINSTOR](https://github.com/piraeusdatastore/piraeus-operator) with LVM thin provisioning on dedicated data disks
+- **Ingress**: [Traefik](https://traefik.io) with HTTP→HTTPS redirect and Let's Encrypt support
+- **Registry**: [Harbor](https://goharbor.io) container registry with Trivy vulnerability scanning
+- **Monitoring**: [Prometheus + Grafana](https://github.com/prometheus-community/helm-charts) (kube-prometheus-stack)
+- **GitOps**: [Gitea](https://gitea.io) + [Argo CD](https://argo-cd.readthedocs.io) for Git-based deployments
+- **Certificates**: [cert-manager](https://cert-manager.io) for automatic TLS
+- **WebAssembly**: [Spin](https://github.com/siderolabs/extensions/tree/main/container-runtime/spin) runtime for Wasm workloads
 
-The [spin extension](https://github.com/siderolabs/extensions/tree/main/container-runtime/spin), which installs [containerd-shim-spin](https://github.com/spinkube/containerd-shim-spin), is used to provide the ability to run [Spin Applications](https://developer.fermyon.com/spin/v2/index) ([WebAssembly/Wasm](https://webassembly.org/)).
+## Architecture
 
-# Usage (Ubuntu 24.04 host)
+```
+┌─────────────────────────────────────────────────────────────┐
+│                      Proxmox Host                           │
+├─────────────────────────────────────────────────────────────┤
+│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐         │
+│  │  Controller │  │   Worker 0   │  │   Worker 1  │   ...   │
+│  │   (Talos)   │  │   (Talos)    │  │   (Talos)   │         │
+│  │             │  │  ┌────────┐  │  │  ┌────────┐ │         │
+│  │             │  │  │/dev/sdb│  │  │  │/dev/sdb│ │ (data)  │
+│  │             │  │  │  LVM   │  │  │  │  LVM   │ │         │
+│  │             │  │  │LINSTOR │  │  │  │LINSTOR │ │         │
+│  │             │  │  └────────┘  │  │  └────────┘ │         │
+│  └─────────────┘  └─────────────┘  └─────────────┘         │
+└─────────────────────────────────────────────────────────────┘
+         │                 │                 │
+         └────────────────┼────────────────┘
+                          │
+              ┌───────────┴───────────┐
+              │     Cilium CNI        │
+              │   (L2 LoadBalancer)   │
+              └───────────────────────┘
+                          │
+              ┌───────────┴───────────┐
+              │       Traefik         │
+              │   (192.168.190.130)   │
+              └───────────────────────┘
+                          │
+         ┌────────────────┼────────────────┐
+         ▼                ▼                ▼
+    ┌─────────┐    ┌─────────────┐   ┌──────────┐
+    │ Harbor  │    │   Grafana   │   │   Apps   │
+    │Registry │    │  Prometheus │   │  Gitea   │
+    │         │    │             │   │ Argo CD  │
+    └─────────┘    └─────────────┘   └──────────┘
+```
 
-# Preinstall
-a) /etc/ssh/sshd_config.d
-50-cloud-init.conf sätt PasswordAuthentication yes
-# Så kan man logga in via ssh
+## Quick Start
 
-b) apt install net-tools 
-# och gör sen en ifconfig
+```bash
+# 1. Configure Proxmox credentials
+source secrets-proxmox.sh
 
-c) sudo apt update
-sudo apt install -y \
-  ca-certificates \
-  curl \
-  gnupg \
-  lsb-release
+# 2. Deploy everything (Terraform + Piraeus + Traefik + Harbor)
+./do apply
+
+# 3. Get access info
+./do info
+```
+
+## The `do` Script
+
+The `do` script is the main deployment tool that handles everything from Terraform to application deployment.
+
+### Commands
+
+| Command                  | Description                                             |
+| ------------------------ | ------------------------------------------------------- |
+| `./do plan`              | Terraform plan only (writes tfplan)                     |
+| `./do apply`             | Full deployment: Terraform + Piraeus + Traefik + Harbor |
+| `./do plan-apply`        | Terraform plan + apply + full bootstrap                 |
+| `./do destroy`           | Terraform destroy (VMs only)                            |
+| `./do reset-piraeus`     | Uninstall Piraeus/LINSTOR from cluster                  |
+| `./do reset-all`         | reset-piraeus + terraform destroy + cleanup files       |
+| `./do deploy-traefik`    | Deploy Traefik ingress controller only                  |
+| `./do deploy-harbor`     | Deploy Harbor container registry only                   |
+| `./do deploy-monitoring` | Deploy Prometheus + Grafana stack                       |
+| `./do info`              | Show access URLs and credentials                        |
+
+### What `./do apply` Does
+
+1. **Terraform Init & Apply**
+   - Initializes Terraform providers
+   - Creates Talos VMs on Proxmox (controllers + workers)
+   - Configures networking with Cilium CNI
+
+2. **Cluster Configuration**
+   - Writes `kubeconfig.yml` and `talosconfig.yml`
+   - Creates Lens-compatible kubeconfig with embedded certs
+   - Runs Talos health checks
+
+3. **Piraeus/LINSTOR Storage Setup**
+   - Validates worker data disks exist (`/dev/sdb`)
+   - Installs Piraeus Operator (v2.10.4)
+   - Deploys LVM init DaemonSet on workers
+   - Creates LVM thin pools using 100% of data disk
+   - Configures LINSTOR storage pools
+   - Creates `linstor-lvm-r1` StorageClass
+   - Runs storage smoke tests
+
+4. **Traefik Ingress Controller**
+   - Installs Traefik via Helm (v34.4.1)
+   - Configures LoadBalancer with Cilium L2 announcement
+   - Enables HTTP→HTTPS redirect
+   - Sets up Kubernetes Ingress and CRD providers
+
+5. **Harbor Container Registry**
+   - Creates TLS certificate via cert-manager
+   - Installs Harbor via Helm (v1.16.2)
+   - Configures LINSTOR persistent storage
+   - Enables Trivy vulnerability scanning
+   - Sets up Traefik ingress
+
+6. **Validation Tests**
+   - DRBD modules loaded on workers
+   - LVM init DaemonSet status
+   - Satellite pod readiness
+   - LINSTOR node registration
+   - Storage pool creation
+   - PVC provisioning test
+
+### Environment Variables
+
+#### Piraeus/LINSTOR Configuration
+
+```bash
+PIRAEUS_OPERATOR_VERSION=2.10.4    # Piraeus Operator version
+LINSTOR_IMAGE_VERSION=v1.32.3      # LINSTOR server version
+DEFAULT_DEVICE=/dev/sdb            # Data disk for LINSTOR
+DEVICE_MAP='w0=/dev/sdb,w1=/dev/vdb'  # Per-node device override
+POOL_NAME=lvm                      # LVM thin pool name
+STORAGECLASS_NAME=linstor-lvm-r1   # StorageClass name
+AUTO_PLACE=1                       # Number of replicas
+```
+
+#### Traefik Configuration
+
+```bash
+TRAEFIK_VERSION=34.4.1             # Traefik Helm chart version
+TRAEFIK_LB_IP=192.168.190.130      # LoadBalancer IP (Cilium L2)
+TRAEFIK_NAMESPACE=traefik          # Kubernetes namespace
+```
+
+#### Harbor Configuration
+
+```bash
+HARBOR_VERSION=1.16.2              # Harbor Helm chart version
+HARBOR_STORAGE_CLASS=linstor-lvm-r1 # StorageClass for PVCs
+HARBOR_ADMIN_PASSWORD=Harbor12345   # Admin password
+HARBOR_DOMAIN=harbor.cure.dev       # Ingress hostname
+HARBOR_NAMESPACE=harbor             # Kubernetes namespace
+```
+
+#### Monitoring Configuration
+
+```bash
+MONITORING_VERSION=72.6.2          # kube-prometheus-stack version
+GRAFANA_DOMAIN=grafana.cure.dev    # Grafana ingress hostname
+GRAFANA_ADMIN_PASSWORD=admin       # Grafana admin password
+MONITORING_NAMESPACE=monitoring    # Kubernetes namespace
+```
+
+#### Skip Flags
+
+```bash
+SKIP_TERRAFORM=1                   # Skip Terraform steps
+SKIP_PIRAEUS=1                     # Skip Piraeus/LINSTOR setup
+SKIP_INGRESS=1                     # Skip Traefik deployment
+SKIP_HARBOR=1                      # Skip Harbor deployment
+```
+
+#### Destructive Flags (OFF by default)
+
+```bash
+WIPE_DISKS=1                       # Wipe data disks before setup
+RESET_LINSTOR_DB=1                 # Clear LINSTOR internal CRD DB
+AUTO_RESET_LINSTOR_DB=1            # Auto-reset on migration failure
+NUKE_TFSTATE=1                     # Delete terraform.tfstate on reset
+```
+
+#### Timeouts
+
+```bash
+WAIT_LINSTOR_AVAILABLE_TIMEOUT=15m # LinstorCluster availability
+WAIT_SATELLITE_PODS_TIMEOUT=2m     # Satellite pod readiness
+WAIT_STORAGEPOOL_TIMEOUT=15m       # Storage pool creation
+```
+
+### Generated Files
+
+| File                            | Description                              |
+| ------------------------------- | ---------------------------------------- |
+| `kubeconfig.yml`                | Flattened kubeconfig with embedded certs |
+| `kubeconfig.raw.yml`            | Raw kubeconfig from Terraform            |
+| `kubeconfig.lens.yml`           | Lens IDE compatible kubeconfig           |
+| `talosconfig.yml`               | Talos configuration file                 |
+| `kubernetes-ingress-ca-crt.pem` | Ingress CA certificate                   |
+| `tfplan`                        | Terraform plan file                      |
+
+---
+
+# Prerequisites (Ubuntu 24.04 host)
+
+### SSH Access
+
+Edit `/etc/ssh/sshd_config.d/50-cloud-init.conf` and set `PasswordAuthentication yes`
+
+### Docker
+
+```bash
+sudo apt update
+sudo apt install -y ca-certificates curl gnupg lsb-release net-tools
 curl -fsSL https://get.docker.com | sudo sh
 sudo usermod -aG docker $USER
 newgrp docker
 docker run --rm hello-world
+```
 
+### Helm
 
-Install terraform:
+```bash
+# see https://github.com/helm/helm/releases
+# renovate: datasource=github-releases depName=helm/helm
+helm_version='3.17.0'
+wget -O- "https://get.helm.sh/helm-v${helm_version}-linux-amd64.tar.gz" | tar xzf - linux-amd64/helm
+sudo install linux-amd64/helm /usr/local/bin
+rm -rf linux-amd64
+```
+
+### Terraform
 
 ```bash
 # see https://github.com/hashicorp/terraform/releases
 # renovate: datasource=github-releases depName=hashicorp/terraform
-  terraform_version='1.14.3'
-  wget "https://releases.hashicorp.com/terraform/$terraform_version/terraform_${$terraform_version}_linux_amd64.zip"
-  unzip "terraform_${$terraform_version}_linux_amd64.zip"
-  sudo install terraform /usr/local/bin
-  rm terraform terraform_*_linux_amd64.zip
+terraform_version='1.14.3'
+wget "https://releases.hashicorp.com/terraform/${terraform_version}/terraform_${terraform_version}_linux_amd64.zip"
+unzip "terraform_${terraform_version}_linux_amd64.zip"
+sudo install terraform /usr/local/bin
+rm terraform terraform_*_linux_amd64.zip
 ```
 
-Install cilium cli:
+### Cilium CLI
 
 ```bash
 # see https://github.com/cilium/cilium-cli/releases
 # renovate: datasource=github-releases depName=cilium/cilium-cli
 cilium_version='0.19.0'
-cilium_url="https://github.com/cilium/cilium-cli/releases/download/v$cilium_version/cilium-linux-amd64.tar.gz"
+cilium_url="https://github.com/cilium/cilium-cli/releases/download/v${cilium_version}/cilium-linux-amd64.tar.gz"
 wget -O- "$cilium_url" | tar xzf - cilium
 sudo install cilium /usr/local/bin/cilium
 rm cilium
 ```
 
-Install cilium hubble:
+### Hubble
 
 ```bash
 # see https://github.com/cilium/hubble/releases
 # renovate: datasource=github-releases depName=cilium/hubble
 hubble_version='1.18.5'
-hubble_url="https://github.com/cilium/hubble/releases/download/v$hubble_version/hubble-linux-amd64.tar.gz"
+hubble_url="https://github.com/cilium/hubble/releases/download/v${hubble_version}/hubble-linux-amd64.tar.gz"
 wget -O- "$hubble_url" | tar xzf - hubble
 sudo install hubble /usr/local/bin/hubble
 rm hubble
 ```
 
-Install talosctl:
+### Talosctl
 
 ```bash
 # see https://github.com/siderolabs/talos/releases
 # renovate: datasource=github-releases depName=siderolabs/talos
 talos_version='1.12.1'
-wget https://github.com/siderolabs/talos/releases/download/v$talos_version/talosctl-linux-amd64
+wget "https://github.com/siderolabs/talos/releases/download/v${talos_version}/talosctl-linux-amd64"
 sudo install talosctl-linux-amd64 /usr/local/bin/talosctl
 rm talosctl-linux-amd64
 ```
 
-Set your Proxmox details:
+---
+
+# Configuration
+
+## Proxmox Server Setup (Run on Proxmox host)
+
+Before running Terraform, you need to configure the Proxmox server. SSH into your Proxmox host and run these commands.
+
+### 1. Create Terraform User and Role
 
 ```bash
-# see https://registry.terraform.io/providers/bpg/proxmox/latest/docs#argument-reference
-# see environment variables at https://github.com/bpg/terraform-provider-proxmox/blob/v0.93.0/proxmoxtf/provider/provider.go#L52-L61
-cat >secrets-proxmox.sh <<EOF
+# Create a dedicated role for Terraform with required privileges
+pveum role add TerraformRole -privs "Datastore.Allocate Datastore.AllocateSpace Datastore.AllocateTemplate Datastore.Audit Pool.Allocate Sys.Audit Sys.Console Sys.Modify SDN.Use VM.Allocate VM.Audit VM.Clone VM.Config.CDROM VM.Config.Cloudinit VM.Config.CPU VM.Config.Disk VM.Config.HWType VM.Config.Memory VM.Config.Network VM.Config.Options VM.Migrate VM.Monitor VM.PowerMgmt"
+
+# Create the terraform user
+pveum user add terraform@pve --password <YOUR_PASSWORD>
+
+# Assign the role to the user on the root path (/) for full access
+pveum aclmod / -user terraform@pve -role TerraformRole
+```
+
+### 2. Alternative: Create API Token (Recommended)
+
+Using an API token is more secure than password authentication:
+
+```bash
+# Create API token for the terraform user
+pveum user token add terraform@pve terraform-token --privsep=0
+
+# Save the output! You'll need the token ID and secret:
+# Token ID: terraform@pve!terraform-token
+# Token Secret: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+```
+
+Then update `secrets-proxmox.sh` to use the token:
+
+```bash
+cat >secrets-proxmox.sh <<'EOF'
+export TF_VAR_proxmox_pve_node_address='192.168.190.118'
+export PROXMOX_VE_INSECURE='1'
+export PROXMOX_VE_ENDPOINT="https://${TF_VAR_proxmox_pve_node_address}:8006"
+export PROXMOX_VE_API_TOKEN='terraform@pve!terraform-token=YOUR_TOKEN_SECRET'
+EOF
+```
+
+### 3. Configure Storage
+
+Ensure you have appropriate storage configured. The defaults expect:
+
+- **local** - For ISO images (Talos boot image)
+- **local-lvm** or similar - For VM disks
+
+Check available storage:
+
+```bash
+pvesm status
+```
+
+### 4. Configure Networking
+
+Ensure your Proxmox host has a bridge network (usually `vmbr0`) that VMs can use:
+
+```bash
+# Check network bridges
+cat /etc/network/interfaces | grep -A5 "iface vmbr"
+```
+
+### 5. Enable Nested Virtualization (Optional, for better performance)
+
+```bash
+# Check if nested virtualization is enabled
+cat /sys/module/kvm_intel/parameters/nested  # Intel
+cat /sys/module/kvm_amd/parameters/nested    # AMD
+
+# Enable if needed (add to /etc/modprobe.d/kvm.conf)
+echo "options kvm_intel nested=1" >> /etc/modprobe.d/kvm.conf  # Intel
+echo "options kvm_amd nested=1" >> /etc/modprobe.d/kvm.conf    # AMD
+```
+
+### 6. Verify Proxmox API Access
+
+Test from your workstation:
+
+```bash
+curl -k "https://YOUR_PROXMOX_IP:8006/api2/json/version"
+```
+
+---
+
+## Workstation Configuration
+
+### Proxmox Credentials
+
+Create `secrets-proxmox.sh`:
+
+```bash
+cat >secrets-proxmox.sh <<'EOF'
 unset HTTPS_PROXY
 #export HTTPS_PROXY='http://localhost:8080'
 export TF_VAR_proxmox_pve_node_address='192.168.190.118'
 export PROXMOX_VE_INSECURE='1'
-export PROXMOX_VE_ENDPOINT="https://$TF_VAR_proxmox_pve_node_address:8006"
-export PROXMOX_VE_USERNAME='root@pam'
-export PROXMOX_VE_PASSWORD='vagrant'
+export PROXMOX_VE_ENDPOINT="https://${TF_VAR_proxmox_pve_node_address}:8006"
+
+# Option 1: Username/Password
+export PROXMOX_VE_USERNAME='terraform@pve'
+export PROXMOX_VE_PASSWORD='your-password'
+
+# Option 2: API Token (comment out username/password above)
+#export PROXMOX_VE_API_TOKEN='terraform@pve!terraform-token=YOUR_TOKEN_SECRET'
 EOF
 source secrets-proxmox.sh
 ```
 
-## Proxmox permissions
+### Troubleshooting Proxmox Permissions
 
-If `terraform apply` fails with `HTTP 403` / `Permission check failed`, the
-Proxmox user or API token is missing privileges to upload the Talos image or
-create VMs. Ensure the account has an appropriate role assigned on the target
-node and datastore (e.g., a role that grants VM create/configure privileges plus
-datastore allocation/audit privileges for the ISO and disks). For example, a
-minimal role typically includes VM allocation/configuration/power management
-privileges and datastore allocation/audit privileges on the `local` and target
-VM storage. Adjust to match your Proxmox permission model.
-
-Build the talos image, and initialize terraform:
+If `terraform apply` fails with `HTTP 403` / `Permission check failed`:
 
 ```bash
-./do init
+# On Proxmox host, verify user and role
+pveum user list
+pveum role list
+pveum acl list
+
+# Re-apply permissions if needed
+pveum aclmod / -user terraform@pve -role TerraformRole
 ```
 
-Create the infrastructure:
+---
+
+# Deployment
+
+## Clean Start (Reset Everything)
+
+If you want to start completely fresh, run these commands to remove all artifacts:
+
+### On Your Workstation
 
 ```bash
-time ./do plan-apply
+# 1. Destroy Terraform-managed VMs (if cluster exists)
+./do destroy
+
+# 2. Full reset: destroy + clean local files
+./do reset-all
+
+# 3. Nuclear option: also delete Terraform state
+NUKE_TFSTATE=1 ./do reset-all
+
+# 4. Manual cleanup of generated files (if reset-all didn't work)
+rm -f kubeconfig*.yml talosconfig.yml tfplan kubernetes-ingress-ca-crt.pem
+rm -rf .terraform .terraform.lock.hcl
+rm -f terraform.tfstate terraform.tfstate.backup
 ```
 
-After `plan-apply`, `./do` writes `talosconfig.yml` and `kubeconfig.yml` and also installs them to the default locations (`~/.talos/config` and `~/.kube/config`) so that `talosctl` and `kubectl` work immediately in a new shell.
-
-Show talos information:
+### On Proxmox Host (if VMs remain)
 
 ```bash
+# List all VMs
+qm list
+
+# Force stop and destroy specific VMs (replace VMID)
+qm stop VMID --skiplock
+qm destroy VMID --purge
+
+# Or destroy all VMs in a range (e.g., 800-810)
+for id in $(seq 800 810); do
+  qm stop $id --skiplock 2>/dev/null
+  qm destroy $id --purge 2>/dev/null
+done
+
+# Clean up orphaned disk images (check first!)
+pvesm list local-lvm | grep -E "vm-[0-9]+-disk"
+
+# Remove Talos ISO if re-downloading
+rm /var/lib/vz/template/iso/talos-*.iso 2>/dev/null
+```
+
+### Verify Clean State
+
+```bash
+# On workstation - should show no resources
+terraform state list
+
+# On Proxmox - should show no Talos VMs
+qm list | grep -i talos
+```
+
+---
+
+## Full Deployment
+
+```bash
+# Initialize and deploy everything
+./do apply
+```
+
+This runs the complete pipeline: Terraform → Piraeus/LINSTOR → Traefik → Harbor
+
+## Step-by-Step Deployment
+
+```bash
+# Plan only (review changes)
+./do plan
+
+# Apply the saved plan
+./do plan-apply
+```
+
+## Individual Components
+
+```bash
+# Deploy Traefik ingress (after Terraform)
+./do deploy-traefik
+
+# Deploy Harbor registry (requires Traefik + cert-manager)
+./do deploy-harbor
+
+# Deploy monitoring stack
+./do deploy-monitoring
+
+# Show all access info
+./do info
+```
+
+---
+
+# Post-Deployment
+
+After `./do apply` completes, your cluster is ready:
+
+```bash
+export KUBECONFIG=$PWD/kubeconfig.yml
 export TALOSCONFIG=$PWD/talosconfig.yml
+```
+
+### Verify Cluster
+
+```bash
+kubectl get nodes -o wide
+kubectl get pods -A
+```
+
+### Talos Information
+
+```bash
 controllers="$(terraform output -raw controllers)"
 workers="$(terraform output -raw workers)"
 all="$controllers,$workers"
 c0="$(echo $controllers | cut -d , -f 1)"
 w0="$(echo $workers | cut -d , -f 1)"
 talosctl --nodes "$all" version
-talosctl --nodes "$all" dashboard
+talosctl --nodes "$c0" dashboard
 ```
 
-If you see errors such as `unknown shortcut -n` or `unknown command`, ensure the
-`talosctl` binary you installed above is on your `PATH` and matches the
-documented version. Running `command -v talosctl` and `talosctl version` should
-confirm you are using the expected CLI.
+> **Note:** If you see errors like `unknown shortcut -n`, ensure the installed `talosctl` binary matches the documented version.
 
-Show kubernetes information:
+### Kubernetes Information
 
 ```bash
-export KUBECONFIG=$PWD/kubeconfig.yml
 kubectl cluster-info
 kubectl get nodes -o wide
 ```
 
-Show Cilium information:
+### Cilium Status
 
 ```bash
-export KUBECONFIG=$PWD/kubeconfig.yml
 cilium status --wait
 kubectl -n kube-system exec ds/cilium -- cilium-dbg status --verbose
 ```
 
-In another shell, open the Hubble UI:
+### Hubble UI (Network Observability)
 
 ```bash
-export KUBECONFIG=$PWD/kubeconfig.yml
 cilium hubble ui
 ```
 
-Execute an example workload:
+### LINSTOR Storage Status
 
 ```bash
-export KUBECONFIG=$PWD/kubeconfig.yml
+kubectl linstor node list
+kubectl linstor storage-pool list
+kubectl linstor volume list
+```
+
+---
+
+# Accessing Services
+
+### Traefik Dashboard
+
+```bash
+traefik_ip=$(kubectl get svc -n traefik traefik -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+echo "Add to /etc/hosts: $traefik_ip traefik.cure.dev"
+```
+
+### Harbor Registry
+
+```bash
+# URL and credentials
+echo "URL: https://harbor.cure.dev"
+echo "User: admin"
+echo "Password: Harbor12345"  # or $HARBOR_ADMIN_PASSWORD
+
+# Docker login
+docker login harbor.cure.dev -u admin -p Harbor12345
+
+# Push an image
+docker tag myimage:latest harbor.cure.dev/library/myimage:latest
+docker push harbor.cure.dev/library/myimage:latest
+```
+
+### Grafana Dashboard
+
+```bash
+echo "URL: https://grafana.cure.dev"
+echo "User: admin"
+echo "Password: admin"  # or $GRAFANA_ADMIN_PASSWORD
+```
+
+### Gitea Git Server
+
+```bash
+export SSL_CERT_FILE="$PWD/kubernetes-ingress-ca-crt.pem"
+gitea_ip="$(kubectl get -n gitea ingress/gitea -o json | jq -r .status.loadBalancer.ingress[0].ip)"
+gitea_fqdn="$(kubectl get -n gitea ingress/gitea -o json | jq -r .spec.rules[0].host)"
+gitea_url="https://$gitea_fqdn"
+echo "URL: $gitea_url"
+echo "User: gitea"
+echo "Password: gitea"
+```
+
+### Argo CD
+
+```bash
+argocd_server_ip="$(kubectl get -n argocd ingress/argocd-server -o json | jq -r .status.loadBalancer.ingress[0].ip)"
+argocd_server_fqdn="$(kubectl get -n argocd ingress/argocd-server -o json | jq -r .spec.rules[0].host)"
+argocd_server_url="https://$argocd_server_fqdn"
+argocd_server_admin_password="$(kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 --decode)"
+echo "URL: $argocd_server_url"
+echo "User: admin"
+echo "Password: $argocd_server_admin_password"
+```
+
+---
+
+# Example Workloads
+
+### Basic Web Application
+
+```bash
 kubectl apply -f example.yml
 kubectl rollout status deployment/example
-kubectl get ingresses,services,pods,deployments
 example_ip="$(kubectl get ingress/example -o json | jq -r .status.loadBalancer.ingress[0].ip)"
 example_fqdn="$(kubectl get ingress/example -o json | jq -r .spec.rules[0].host)"
-example_url="http://$example_fqdn"
-curl --resolve "$example_fqdn:80:$example_ip" "$example_url"
-echo "$example_ip $example_fqdn" | sudo tee -a /etc/hosts
-curl "$example_url"
-xdg-open "$example_url"
+curl --resolve "$example_fqdn:80:$example_ip" "http://$example_fqdn"
 kubectl delete -f example.yml
 ```
 
-Execute the [example hello-etcd stateful application](https://github.com/rgl/hello-etcd):
+### Stateful Application (hello-etcd)
+
+Tests LINSTOR persistent storage:
 
 ```bash
 # see https://github.com/rgl/hello-etcd/tags
@@ -199,84 +662,47 @@ kubectl get service,statefulset,pod,pvc,pv,sc
 kubectl linstor volume list
 ```
 
-Access the `hello-etcd` service from a [kubectl port-forward local port](https://kubernetes.io/docs/tasks/access-application-cluster/port-forward-access-application-cluster/):
+Access via port-forward:
 
 ```bash
 kubectl port-forward service/hello-etcd 6789:web &
 sleep 3
-wget -qO- http://localhost:6789 # Hello World #1!
-wget -qO- http://localhost:6789 # Hello World #2!
-wget -qO- http://localhost:6789 # Hello World #3!
+curl http://localhost:6789   # Hello World #1!
+curl http://localhost:6789   # Hello World #2!
+curl http://localhost:6789   # Hello World #3!
 ```
 
-Delete the etcd pod:
+Test persistence (delete pod, data survives):
 
 ```bash
-# NB the used StorageClass is configured with ReclaimPolicy set to Delete. this
-#    means that, when we delete the application PersistentVolumeClaim, the
-#    volume will be deleted from the linstor storage-pool. please note that
-#    this will only happen when the pvc finalizers list is empty. since the
-#    pvc is created by the statefulset (due to having
-#    persistentVolumeClaimRetentionPolicy set to Retain), and it adds the
-#    kubernetes.io/pvc-protection finalizer, which means, the pvc will only be
-#    deleted when you explicitly delete it (and nothing is using it as noted by
-#    an empty finalizers list)
-# NB although we delete the pod, the StatefulSet will create a fresh pod to
-#    replace it. using the same persistent volume as the old one.
 kubectl delete pod/hello-etcd-etcd-0
-kubectl get pod/hello-etcd-etcd-0 # NB its age should be in the seconds range.
-kubectl rollout status deployment hello-etcd
 kubectl rollout status statefulset hello-etcd-etcd
-kubectl get pvc,pv
-kubectl linstor volume list
+curl http://localhost:6789   # Hello World #4! (continues!)
 ```
 
-Access the application, and notice that the counter continues after the previously returned value, which means that although the etcd instance is different, it picked up the same persistent volume:
-
-```bash
-wget -qO- http://localhost:6789 # Hello World #4!
-wget -qO- http://localhost:6789 # Hello World #5!
-wget -qO- http://localhost:6789 # Hello World #6!
-```
-
-Delete everything:
+Cleanup:
 
 ```bash
 kubectl delete -f manifest.yml
-kill %1 && sleep 1 # kill the kubectl port-forward background command execution.
-# NB the pvc will not be automatically deleted because it has the
-#    kubernetes.io/pvc-protection finalizer (set by the statefulset, due to
-#    having persistentVolumeClaimRetentionPolicy set to Retain), which prevents
-#    it from being automatically deleted.
-kubectl get pvc,pv
-kubectl linstor volume list
-# delete the pvc (which will also trigger the pv (persistent volume) deletion
-# because the associated storageclass reclaim policy is set to delete).
+kill %1   # Stop port-forward
 kubectl delete pvc/etcd-data-hello-etcd-etcd-0
-# NB you should wait until its actually deleted.
-kubectl get pvc,pv
-kubectl linstor volume list
 popd
 ```
 
-Execute an [example WebAssembly (Wasm) Spin workload](https://github.com/rgl/spin-http-rust-example):
+### WebAssembly (Wasm) Spin Workload
 
 ```bash
-export KUBECONFIG=$PWD/kubeconfig.yml
 kubectl apply -f example-spin.yml
 kubectl rollout status deployment/example-spin
-kubectl get ingresses,services,pods,deployments
 example_spin_ip="$(kubectl get ingress/example-spin -o json | jq -r .status.loadBalancer.ingress[0].ip)"
 example_spin_fqdn="$(kubectl get ingress/example-spin -o json | jq -r .spec.rules[0].host)"
-example_spin_url="http://$example_spin_fqdn"
-curl --resolve "$example_spin_fqdn:80:$example_spin_ip" "$example_spin_url"
-echo "$example_spin_ip $example_spin_fqdn" | sudo tee -a /etc/hosts
-curl "$example_spin_url"
-xdg-open "$example_spin_url"
+curl --resolve "$example_spin_fqdn:80:$example_spin_ip" "http://$example_spin_fqdn"
 kubectl delete -f example-spin.yml
 ```
 
-Access Gitea:
+---
+
+# GitOps with Argo CD
 
 ```bash
 export KUBECONFIG=$PWD/kubeconfig.yml
@@ -292,32 +718,11 @@ echo "$gitea_ip $gitea_fqdn" | sudo tee -a /etc/hosts
 xdg-open "$gitea_url"
 ```
 
-Access Argo CD:
+# GitOps with Argo CD
 
-```bash
-export KUBECONFIG=$PWD/kubeconfig.yml
-argocd_server_ip="$(kubectl get -n argocd ingress/argocd-server -o json | jq -r .status.loadBalancer.ingress[0].ip)"
-argocd_server_fqdn="$(kubectl get -n argocd ingress/argocd-server -o json | jq -r .spec.rules[0].host)"
-argocd_server_url="https://$argocd_server_fqdn"
-argocd_server_admin_password="$(
-  kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath="{.data.password}" \
-    | base64 --decode)"
-echo "argocd_server_url: $argocd_server_url"
-echo "argocd_server_admin_password: $argocd_server_admin_password"
-echo "$argocd_server_ip $argocd_server_fqdn" | sudo tee -a /etc/hosts
-xdg-open "$argocd_server_url"
-```
+### Fix Argo CD UI Errors
 
-If the Argo CD UI is showing these kind of errors:
-
-> Unable to load data: permission denied
-> Unable to load data: error getting cached app managed resources: NOAUTH Authentication required.
-> Unable to load data: error getting cached app managed resources: cache: key is missing
-> Unable to load data: error getting cached app managed resources: InvalidSpecError: Application referencing project default which does not exist
-
-Try restarting some of the Argo CD components, and after restarting them, the
-Argo CD UI should start working after a few minutes (e.g. at the next sync
-interval, which defaults to 3m):
+If the Argo CD UI shows permission/cache errors, restart the components:
 
 ```bash
 kubectl -n argocd rollout restart statefulset argocd-application-controller
@@ -326,249 +731,188 @@ kubectl -n argocd rollout restart deployment argocd-server
 kubectl -n argocd rollout status deployment argocd-server --watch
 ```
 
-Create the `argocd-example` repository:
+### Create GitOps Repository
 
 ```bash
 export SSL_CERT_FILE="$PWD/kubernetes-ingress-ca-crt.pem"
 export GIT_SSL_CAINFO="$SSL_CERT_FILE"
-curl \
-  --silent \
-  --show-error \
-  --fail-with-body \
-  -u gitea:gitea \
-  -X POST \
-  -H 'Accept: application/json' \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "name": "argocd-example",
-    "private": true
-  }' \
-  https://gitea.example.test/api/v1/user/repos \
-  | jq
+
+# Create repo in Gitea
+curl -u gitea:gitea -X POST -H 'Content-Type: application/json' \
+  -d '{"name": "argocd-example", "private": true}' \
+  https://gitea.example.test/api/v1/user/repos
+
+# Initialize and push
 rm -rf tmp/argocd-example
 git init tmp/argocd-example
-pushd tmp/argocd-example
+cd tmp/argocd-example
 git branch -m main
 cp ../../example.yml .
-git add .
-git commit -m init
+git add . && git commit -m init
 git remote add origin https://gitea.example.test/gitea/argocd-example.git
 git push -u origin main
-popd
+cd ../..
 ```
 
-Create the `argocd-example` argocd application:
+### Create Argo CD Application
 
 ```bash
-# NB we have to access gitea thru the internal cluster service because the
-#    external/ingress domains does not resolve inside the cluster.
-argocd login \
-  "$argocd_server_fqdn" \
-  --username admin \
-  --password "$argocd_server_admin_password"
-argocd cluster list
-# NB we have to access gitea thru the internal cluster service because the
-#    external/ingress domains does not resolve inside the cluster.
-# NB if git repository was hosted outside of the cluster, we might have
-#    needed to execute the following to trust the certificate.
-#     argocd cert add-tls gitea.example.test --from "$SSL_CERT_FILE"
-#     argocd cert list --cert-type https
-argocd repo add \
-  http://gitea-http.gitea.svc:3000/gitea/argocd-example.git \
-  --username gitea \
-  --password gitea
-argocd app create \
-  argocd-example \
+argocd login "$argocd_server_fqdn" --username admin --password "$argocd_server_admin_password"
+argocd repo add http://gitea-http.gitea.svc:3000/gitea/argocd-example.git \
+  --username gitea --password gitea
+argocd app create argocd-example \
   --dest-name in-cluster \
   --dest-namespace default \
   --project default \
-  --auto-prune \
-  --self-heal \
+  --auto-prune --self-heal \
   --sync-policy automatic \
   --repo http://gitea-http.gitea.svc:3000/gitea/argocd-example.git \
   --path .
-argocd app list
 argocd app wait argocd-example --health --timeout 300
-kubectl get crd | grep argoproj.io
-kubectl -n argocd get applications
-kubectl -n argocd get application/argocd-example -o yaml
 ```
 
-Access the example application:
+---
+
+# Cleanup
+
+### Destroy Infrastructure
 
 ```bash
-kubectl rollout status deployment/example
-kubectl get ingresses,services,pods,deployments
-example_ip="$(kubectl get ingress/example -o json | jq -r .status.loadBalancer.ingress[0].ip)"
-example_fqdn="$(kubectl get ingress/example -o json | jq -r .spec.rules[0].host)"
-example_url="http://$example_fqdn"
-curl --resolve "$example_fqdn:80:$example_ip" "$example_url"
-echo "$example_ip $example_fqdn" | sudo tee -a /etc/hosts
-curl "$example_url"
-xdg-open "$example_url"
+./do destroy
 ```
 
-Modify the example application, by bumping the number of replicas:
+> **Note:** This does NOT wipe data disks inside VMs. Use `WIPE_DISKS=1` on next apply if re-creating with same disks.
+
+### Full Reset
 
 ```bash
-pushd tmp/argocd-example
-sed -i -E 's,(replicas:) .+,\1 3,g' example.yml
-git diff
-git add .
-git commit -m 'bump replicas'
-git push -u origin main
-popd
+./do reset-all
 ```
 
-Then go the Argo CD UI, and wait for it to eventually sync the example argocd
-application, or click `Refresh` to sync it immediately.
+This will:
 
-Delete the example argocd application and repository:
+1. Uninstall Piraeus/LINSTOR from cluster
+2. Run `terraform destroy`
+3. Clean up generated files (kubeconfig, talosconfig, tfplan)
+
+### Reset Piraeus Only
 
 ```bash
-argocd app delete \
-  argocd-example \
-  --yes
-argocd repo rm \
-  http://gitea-http.gitea.svc:3000/gitea/argocd-example.git
-curl \
-  --silent \
-  --show-error \
-  --fail-with-body \
-  -u gitea:gitea \
-  -X DELETE \
-  -H 'Accept: application/json' \
-  "$gitea_url/api/v1/repos/gitea/argocd-example" \
-  | jq
+./do reset-piraeus
 ```
 
-Destroy the infrastructure:
+### Nuclear Option (delete Terraform state)
 
 ```bash
-time ./do destroy
+NUKE_TFSTATE=1 ./do reset-all
 ```
 
-List this repository dependencies (and which have newer versions):
+---
+
+# Troubleshooting
+
+## Talos
 
 ```bash
-GITHUB_COM_TOKEN='YOUR_GITHUB_PERSONAL_TOKEN' ./renovate.sh
-```
+# Collect support bundle
+talosctl -n $all support && rm -rf support && 7z x -osupport support.zip
 
-Update the talos extensions to match the talos version:
-
-```bash
-./do update-talos-extensions
-```
-
-# Troubleshoot
-
-Talos:
-
-```bash
-# see https://docs.siderolabs.com/talos/v1.12/troubleshooting/troubleshooting
-talosctl -n $all support && rm -rf support && 7z x -osupport support.zip && code support
-talosctl -n $c0 service ext-qemu-guest-agent status
+# Service status
 talosctl -n $c0 service etcd status
 talosctl -n $c0 etcd status
-talosctl -n $c0 etcd alarm list
 talosctl -n $c0 etcd members
-# NB talosctl get members requires the talos discovery service, which we disable
-#    by default, so this will not return anything.
-#    see talos.tf.
-talosctl -n $c0 get members
+
+# Health check
 talosctl -n $c0 health --control-plane-nodes $controllers --worker-nodes $workers
-talosctl -n $c0 inspect dependencies | dot -Tsvg >c0.svg && xdg-open c0.svg
-talosctl -n $c0 dashboard
+
+# Logs
 talosctl -n $c0 logs kernel
-talosctl -n $c0 logs controller-runtime
 talosctl -n $c0 logs kubelet
-talosctl -n $c0 mounts | sort
-talosctl -n $c0 get blockdevices
+
+# Dashboard
+talosctl -n $c0 dashboard
+
+# Disks
 talosctl -n $c0 get disks
-talosctl -n $c0 get systemdisk
-talosctl -n $c0 get resourcedefinitions
-talosctl -n $c0 get machineconfigs -o yaml
-talosctl -n $c0 get staticpods -o yaml
-talosctl -n $c0 get staticpodstatus
-talosctl -n $c0 get manifests
-talosctl -n $c0 get services
-talosctl -n $c0 get extensions
+talosctl -n $c0 get blockdevices
+
+# Network
 talosctl -n $c0 get addresses
-talosctl -n $c0 get nodeaddresses
 talosctl -n $c0 netstat --extend --programs --pods --listening
-talosctl -n $c0 list -l -r -t f /etc
-talosctl -n $c0 list -l -r -t f /system
-talosctl -n $c0 list -l -r -t f /var
-talosctl -n $c0 list -l -r /dev
-talosctl -n $c0 list -l /sys/fs/cgroup
-talosctl -n $c0 read /proc/cmdline | tr ' ' '\n'
-talosctl -n $c0 read /proc/mounts | sort
-talosctl -n $w0 read /proc/modules | sort
-talosctl -n $w0 read /sys/module/drbd/parameters/usermode_helper
-talosctl -n $c0 read /etc/os-release
-talosctl -n $c0 read /etc/resolv.conf
-talosctl -n $c0 read /etc/hosts
-talosctl -n $c0 read /etc/containerd/config.toml
-talosctl -n $c0 read /etc/cri/containerd.toml
-talosctl -n $c0 read /etc/cri/conf.d/cri.toml
-talosctl -n $c0 read /etc/kubernetes/kubelet.yaml
-talosctl -n $c0 read /etc/kubernetes/kubeconfig-kubelet
-talosctl -n $c0 read /etc/kubernetes/bootstrap-kubeconfig
-talosctl -n $c0 ps
-talosctl -n $c0 containers -k
 ```
 
-Cilium:
+## Cilium
 
 ```bash
 cilium status --wait
 kubectl -n kube-system exec ds/cilium -- cilium-dbg status --verbose
 cilium config view
 cilium hubble ui
-# **NB** cilium connectivity test is not working out-of-the-box in the default
-# test namespaces and using it in kube-system namespace will leave garbage
-# behind.
-#cilium connectivity test --test-namespace kube-system
 kubectl -n kube-system get leases | grep cilium-l2announce-
 ```
 
-Kubernetes:
+## Kubernetes
 
 ```bash
 kubectl get events --all-namespaces --watch
-kubectl --namespace kube-system get events --watch
-kubectl --namespace kube-system debug node/w0 --stdin --tty --image=busybox:1.36 -- cat /host/etc/resolv.conf
-kubectl --namespace kube-system get configmaps coredns --output yaml
-pod_name="$(kubectl --namespace kube-system get pods --selector k8s-app=kube-dns --output json | jq -r '.items[0].metadata.name')"
-kubectl --namespace kube-system debug $pod_name --stdin --tty --image=busybox:1.36 --target=coredns -- sh -c 'cat /proc/$(pgrep coredns)/root/etc/resolv.conf'
-kubectl --namespace kube-system run busybox -it --rm --restart=Never --image=busybox:1.36 -- nslookup -type=a talos.dev
 kubectl get crds
 kubectl api-resources
 ```
 
-Storage (lvm/drbd/linstor/piraeus):
+## Storage (LINSTOR/Piraeus)
 
 ```bash
-# If your worker data disk is not /dev/sdb (e.g. /dev/vdb or /dev/sdc), set:
-# export LINSTOR_DEVICE=/dev/vdb
-# If you only see DfltDisklessStorPool and capacity is 0, the worker data disk
-# was not detected or initialized. Verify the extra disk exists in Proxmox and
-# that LINSTOR_DEVICE matches it, then re-run ./do piraeus-install.
-# NB kubectl linstor node list is equivalent to:
-#    kubectl -n piraeus-datastore exec deploy/linstor-controller -- linstor node list
+# Node and pool status
 kubectl linstor node list
 kubectl linstor storage-pool list
 kubectl linstor volume list
-kubectl -n piraeus-datastore exec daemonset/linstor-satellite.w0 -- drbdadm status
+
+# LVM details on worker
 kubectl -n piraeus-datastore exec daemonset/linstor-satellite.w0 -- lvdisplay
 kubectl -n piraeus-datastore exec daemonset/linstor-satellite.w0 -- vgdisplay
 kubectl -n piraeus-datastore exec daemonset/linstor-satellite.w0 -- pvdisplay
-w0_csi_node_pod_name="$(
-  kubectl -n piraeus-datastore get pods \
-    --field-selector spec.nodeName=w0 \
-    --selector app.kubernetes.io/component=linstor-csi-node \
-    --output 'jsonpath={.items[*].metadata.name}')"
-kubectl -n piraeus-datastore exec "pod/$w0_csi_node_pod_name" -- lsblk
-kubectl -n piraeus-datastore exec "pod/$w0_csi_node_pod_name" -- bash -c 'mount | grep /dev/drbd'
-kubectl -n piraeus-datastore exec "pod/$w0_csi_node_pod_name" -- bash -c 'df -h | grep -P "Filesystem|/dev/drbd"'
+
+# DRBD status
+kubectl -n piraeus-datastore exec daemonset/linstor-satellite.w0 -- drbdadm status
+
+# CSI node pod
+w0_csi_node_pod_name="$(kubectl -n piraeus-datastore get pods \
+  --field-selector spec.nodeName=w0 \
+  --selector app.kubernetes.io/component=linstor-csi-node \
+  --output 'jsonpath={.items[*].metadata.name}')"
+kubectl -n piraeus-datastore exec "$w0_csi_node_pod_name" -- lsblk
+kubectl -n piraeus-datastore exec "$w0_csi_node_pod_name" -- bash -c 'mount | grep /dev/drbd'
 ```
+
+> **Tip:** If storage pools show 0 capacity, verify the data disk exists in Proxmox and matches `DEFAULT_DEVICE`.
+
+---
+
+# Maintenance
+
+## Update Dependencies
+
+```bash
+GITHUB_COM_TOKEN='YOUR_TOKEN' ./renovate.sh
+```
+
+## Update Talos Extensions
+
+```bash
+./do update-talos-extensions
+```
+
+---
+
+# Version Information
+
+| Component             | Version                |
+| --------------------- | ---------------------- |
+| Talos Linux           | 1.8.4+                 |
+| Piraeus Operator      | 2.10.4                 |
+| LINSTOR               | 1.32.3                 |
+| Traefik               | 34.4.1                 |
+| Harbor                | 1.16.2                 |
+| kube-prometheus-stack | 72.6.2                 |
+| Cilium                | (managed by Terraform) |
+| cert-manager          | 1.19.2                 |

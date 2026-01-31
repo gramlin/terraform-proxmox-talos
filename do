@@ -739,10 +739,22 @@ check_cluster_network_access() {
   info "Testing if cluster can reach quay.io (required for pulling Piraeus images)..."
   
   # Create a test pod that attempts to reach quay.io
-  kubectl run network-test --image=busybox:1.36 --restart=Never --rm -i --timeout=60s -- \
-    sh -c 'wget -T 10 -O- https://quay.io 2>&1 | head -20' 2>&1 | tee /tmp/network-test.log || true
+  # Use securityContext to satisfy PodSecurity policies
+  kubectl run network-test --image=busybox:1.36 --restart=Never --rm -i --timeout=60s \
+    --overrides='{
+      "spec": {
+        "securityContext": {"runAsNonRoot": true, "runAsUser": 1000, "seccompProfile": {"type": "RuntimeDefault"}},
+        "containers": [{
+          "name": "network-test",
+          "image": "busybox:1.36",
+          "command": ["sh", "-c", "wget -T 10 -O- https://quay.io 2>&1 | head -20"],
+          "securityContext": {"allowPrivilegeEscalation": false, "capabilities": {"drop": ["ALL"]}}
+        }]
+      }
+    }' 2>&1 | tee /tmp/network-test.log || true
   
-  if grep -qi "connected\|200 OK\|301\|302" /tmp/network-test.log 2>/dev/null; then
+  # Check for signs of successful connection (HTML content, or connection messages)
+  if grep -qiE "DOCTYPE|html|quay|Connecting to|connected" /tmp/network-test.log 2>/dev/null; then
     info "✓ Cluster has internet access to quay.io"
     return 0
   else
@@ -1423,6 +1435,268 @@ cmd_reset_all() {
 }
 
 # -----------------------------
+# Traefik Ingress Controller
+# -----------------------------
+
+TRAEFIK_VERSION="${TRAEFIK_VERSION:-34.4.1}"
+TRAEFIK_NAMESPACE="${TRAEFIK_NAMESPACE:-traefik}"
+TRAEFIK_LB_IP="${TRAEFIK_LB_IP:-192.168.190.130}"
+
+deploy_traefik() {
+  step "deploy Traefik ingress controller"
+  need kubectl
+  need helm
+
+  # Create namespace
+  kubectl create namespace "$TRAEFIK_NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
+
+  # Add Traefik Helm repo
+  helm repo add traefik https://traefik.github.io/charts 2>/dev/null || true
+  helm repo update traefik
+
+  # Check if already installed
+  if helm status traefik -n "$TRAEFIK_NAMESPACE" &>/dev/null; then
+    info "Traefik already installed, upgrading..."
+    local cmd="upgrade"
+  else
+    info "Installing Traefik..."
+    local cmd="install"
+  fi
+
+  # Install/upgrade Traefik
+  helm $cmd traefik traefik/traefik \
+    --namespace "$TRAEFIK_NAMESPACE" \
+    --version "$TRAEFIK_VERSION" \
+    --set deployment.replicas=2 \
+    --set service.type=LoadBalancer \
+    --set "service.annotations.io\.cilium/lb-ipam-ips=$TRAEFIK_LB_IP" \
+    --set ports.web.redirectTo.port=websecure \
+    --set ports.websecure.tls.enabled=true \
+    --set ingressRoute.dashboard.enabled=true \
+    --set providers.kubernetesCRD.enabled=true \
+    --set providers.kubernetesCRD.allowCrossNamespace=true \
+    --set providers.kubernetesIngress.enabled=true \
+    --set providers.kubernetesIngress.publishedService.enabled=true \
+    --set logs.general.level=INFO \
+    --set logs.access.enabled=true \
+    --wait --timeout=5m
+
+  # Wait for Traefik to be ready
+  kubectl rollout status deployment/traefik -n "$TRAEFIK_NAMESPACE" --timeout=5m
+
+  # Show status
+  info "Traefik deployed!"
+  kubectl get svc -n "$TRAEFIK_NAMESPACE" traefik
+  
+  local lb_ip
+  lb_ip=$(kubectl get svc -n "$TRAEFIK_NAMESPACE" traefik -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "pending")
+  info "Traefik LoadBalancer IP: $lb_ip"
+}
+
+# -----------------------------
+# Harbor Container Registry
+# -----------------------------
+
+HARBOR_VERSION="${HARBOR_VERSION:-1.16.2}"
+HARBOR_NAMESPACE="${HARBOR_NAMESPACE:-harbor}"
+HARBOR_STORAGE_CLASS="${HARBOR_STORAGE_CLASS:-linstor-lvm-r1}"
+HARBOR_ADMIN_PASSWORD="${HARBOR_ADMIN_PASSWORD:-Harbor12345}"
+HARBOR_DOMAIN="${HARBOR_DOMAIN:-harbor.${INGRESS_DOMAIN:-cure.dev}}"
+
+deploy_harbor() {
+  step "deploy Harbor container registry"
+  need kubectl
+  need helm
+
+  # Create namespace
+  kubectl create namespace "$HARBOR_NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
+
+  # Create TLS certificate via cert-manager (if available)
+  if kubectl get clusterissuer ingress &>/dev/null; then
+    info "Creating Harbor TLS certificate via cert-manager..."
+    kubectl apply -f - <<EOF
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: harbor-tls
+  namespace: $HARBOR_NAMESPACE
+spec:
+  secretName: harbor-tls
+  commonName: harbor
+  dnsNames:
+    - $HARBOR_DOMAIN
+  issuerRef:
+    kind: ClusterIssuer
+    name: ingress
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  duration: 4320h
+EOF
+    # Wait for certificate
+    kubectl wait --for=condition=Ready certificate/harbor-tls -n "$HARBOR_NAMESPACE" --timeout=60s || warn "Certificate may not be ready yet"
+  else
+    warn "cert-manager ClusterIssuer 'ingress' not found, Harbor will use auto-generated certs"
+  fi
+
+  # Add Harbor Helm repo
+  helm repo add harbor https://helm.goharbor.io 2>/dev/null || true
+  helm repo update harbor
+
+  # Check if already installed
+  if helm status harbor -n "$HARBOR_NAMESPACE" &>/dev/null; then
+    info "Harbor already installed, upgrading..."
+    local cmd="upgrade"
+  else
+    info "Installing Harbor..."
+    local cmd="install"
+  fi
+
+  # Install/upgrade Harbor
+  helm $cmd harbor harbor/harbor \
+    --namespace "$HARBOR_NAMESPACE" \
+    --version "$HARBOR_VERSION" \
+    --set externalURL="https://$HARBOR_DOMAIN" \
+    --set expose.type=ingress \
+    --set expose.tls.enabled=true \
+    --set expose.tls.certSource=secret \
+    --set expose.tls.secret.secretName=harbor-tls \
+    --set expose.ingress.hosts.core="$HARBOR_DOMAIN" \
+    --set expose.ingress.className=traefik \
+    --set "expose.ingress.annotations.traefik\.ingress\.kubernetes\.io/router\.entrypoints=websecure" \
+    --set "expose.ingress.annotations.traefik\.ingress\.kubernetes\.io/router\.tls=true" \
+    --set persistence.enabled=true \
+    --set persistence.persistentVolumeClaim.registry.storageClass="$HARBOR_STORAGE_CLASS" \
+    --set persistence.persistentVolumeClaim.registry.size=50Gi \
+    --set persistence.persistentVolumeClaim.database.storageClass="$HARBOR_STORAGE_CLASS" \
+    --set persistence.persistentVolumeClaim.database.size=5Gi \
+    --set persistence.persistentVolumeClaim.redis.storageClass="$HARBOR_STORAGE_CLASS" \
+    --set persistence.persistentVolumeClaim.redis.size=1Gi \
+    --set persistence.persistentVolumeClaim.trivy.storageClass="$HARBOR_STORAGE_CLASS" \
+    --set persistence.persistentVolumeClaim.trivy.size=5Gi \
+    --set harborAdminPassword="$HARBOR_ADMIN_PASSWORD" \
+    --set trivy.enabled=true \
+    --set notary.enabled=false \
+    --set metrics.enabled=true \
+    --wait --timeout=10m
+
+  # Wait for core components
+  info "Waiting for Harbor components..."
+  kubectl rollout status deployment/harbor-core -n "$HARBOR_NAMESPACE" --timeout=5m || warn "harbor-core may not be ready"
+  kubectl rollout status deployment/harbor-portal -n "$HARBOR_NAMESPACE" --timeout=5m || warn "harbor-portal may not be ready"
+
+  info "Harbor deployed!"
+  info "  URL: https://$HARBOR_DOMAIN"
+  info "  User: admin"
+  info "  Password: $HARBOR_ADMIN_PASSWORD"
+}
+
+# -----------------------------
+# Monitoring Stack (Prometheus + Grafana)
+# -----------------------------
+
+MONITORING_VERSION="${MONITORING_VERSION:-72.6.2}"
+MONITORING_NAMESPACE="${MONITORING_NAMESPACE:-monitoring}"
+GRAFANA_DOMAIN="${GRAFANA_DOMAIN:-grafana.${INGRESS_DOMAIN:-cure.dev}}"
+GRAFANA_ADMIN_PASSWORD="${GRAFANA_ADMIN_PASSWORD:-admin}"
+
+deploy_monitoring() {
+  step "deploy monitoring stack (Prometheus + Grafana)"
+  need kubectl
+  need helm
+
+  # Create namespace
+  kubectl create namespace "$MONITORING_NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
+
+  # Add Prometheus community Helm repo
+  helm repo add prometheus-community https://prometheus-community.github.io/helm-charts 2>/dev/null || true
+  helm repo update prometheus-community
+
+  # Check if already installed
+  if helm status monitoring -n "$MONITORING_NAMESPACE" &>/dev/null; then
+    info "Monitoring stack already installed, upgrading..."
+    local cmd="upgrade"
+  else
+    info "Installing monitoring stack..."
+    local cmd="install"
+  fi
+
+  # Install/upgrade kube-prometheus-stack
+  helm $cmd monitoring prometheus-community/kube-prometheus-stack \
+    --namespace "$MONITORING_NAMESPACE" \
+    --version "$MONITORING_VERSION" \
+    --set prometheus.prometheusSpec.storageSpec.volumeClaimTemplate.spec.storageClassName="$HARBOR_STORAGE_CLASS" \
+    --set prometheus.prometheusSpec.storageSpec.volumeClaimTemplate.spec.resources.requests.storage=20Gi \
+    --set grafana.persistence.enabled=true \
+    --set grafana.persistence.storageClassName="$HARBOR_STORAGE_CLASS" \
+    --set grafana.persistence.size=5Gi \
+    --set grafana.adminPassword="$GRAFANA_ADMIN_PASSWORD" \
+    --set grafana.ingress.enabled=true \
+    --set grafana.ingress.ingressClassName=traefik \
+    --set "grafana.ingress.hosts[0]=$GRAFANA_DOMAIN" \
+    --set alertmanager.alertmanagerSpec.storage.volumeClaimTemplate.spec.storageClassName="$HARBOR_STORAGE_CLASS" \
+    --set alertmanager.alertmanagerSpec.storage.volumeClaimTemplate.spec.resources.requests.storage=2Gi \
+    --wait --timeout=10m
+
+  info "Monitoring stack deployed!"
+  info "  Grafana URL: https://$GRAFANA_DOMAIN"
+  info "  Grafana User: admin"
+  info "  Grafana Password: $GRAFANA_ADMIN_PASSWORD"
+}
+
+# -----------------------------
+# Print access info
+# -----------------------------
+
+print_access_info() {
+  step "Access Information"
+  
+  local traefik_ip harbor_ready grafana_ready
+  
+  traefik_ip=$(kubectl get svc -n traefik traefik -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "N/A")
+  
+  echo ""
+  echo "=============================================="
+  echo "           CLUSTER ACCESS INFO"
+  echo "=============================================="
+  echo ""
+  echo "Kubeconfig: export KUBECONFIG=$KUBECONFIG_OUT"
+  echo ""
+  echo "--- Ingress (Traefik) ---"
+  echo "LoadBalancer IP: $traefik_ip"
+  echo "Dashboard: https://traefik.${INGRESS_DOMAIN:-cure.dev}"
+  echo ""
+  
+  if kubectl get namespace harbor &>/dev/null; then
+    echo "--- Harbor Container Registry ---"
+    echo "URL: https://${HARBOR_DOMAIN:-harbor.cure.dev}"
+    echo "User: admin"
+    echo "Password: $HARBOR_ADMIN_PASSWORD"
+    echo ""
+    echo "Docker login:"
+    echo "  docker login ${HARBOR_DOMAIN:-harbor.cure.dev} -u admin -p $HARBOR_ADMIN_PASSWORD"
+    echo ""
+  fi
+  
+  if kubectl get namespace monitoring &>/dev/null; then
+    echo "--- Monitoring (Grafana) ---"
+    echo "URL: https://${GRAFANA_DOMAIN:-grafana.cure.dev}"
+    echo "User: admin"
+    echo "Password: $GRAFANA_ADMIN_PASSWORD"
+    echo ""
+  fi
+  
+  echo "--- DNS Setup ---"
+  echo "Add to /etc/hosts or local DNS:"
+  echo "  $traefik_ip  traefik.${INGRESS_DOMAIN:-cure.dev}"
+  echo "  $traefik_ip  harbor.${INGRESS_DOMAIN:-cure.dev}"
+  echo "  $traefik_ip  grafana.${INGRESS_DOMAIN:-cure.dev}"
+  echo "  $traefik_ip  gitea.${INGRESS_DOMAIN:-cure.dev}"
+  echo ""
+  echo "=============================================="
+}
+
+# -----------------------------
 # Main pipeline (after terraform apply)
 # -----------------------------
 post_apply_pipeline() {
@@ -1472,11 +1746,27 @@ post_apply_pipeline() {
   test_pvc_provisioning
   export_ingress_ca
 
+  # Deploy Traefik and Harbor if not skipped
+  if [[ "${SKIP_INGRESS:-0}" != "1" ]]; then
+    deploy_traefik
+  else
+    warn "Skipping Traefik (SKIP_INGRESS=1)"
+  fi
+
+  if [[ "${SKIP_HARBOR:-0}" != "1" ]]; then
+    deploy_harbor
+  else
+    warn "Skipping Harbor (SKIP_HARBOR=1)"
+  fi
+
   step "cluster nodes"
   kubectl get nodes -o wide || true
 
   step "Test summary"
   run_all_tests
+
+  # Print access info
+  print_access_info
 
   step "done"
   info "Lens-friendly kubeconfig: $KUBECONFIG_LENS_OUT"
@@ -1520,6 +1810,11 @@ Usage:
   $0 destroy
   $0 reset-piraeus
   $0 reset-all
+  $0 deploy-traefik      # Deploy Traefik only
+  $0 deploy-harbor       # Deploy Harbor only
+  $0 deploy-monitoring   # Deploy Prometheus + Grafana
+  $0 info                # Show access info
+  $0 test                # Run validation tests
 
 Common env overrides:
   # Terraform var-file selection (optional)
@@ -1536,6 +1831,20 @@ Common env overrides:
   STORAGECLASS_NAME=linstor-lvm-r1
   AUTO_PLACE=1
 
+  # Traefik
+  TRAEFIK_VERSION=34.4.1
+  TRAEFIK_LB_IP=192.168.190.130
+
+  # Harbor
+  HARBOR_VERSION=1.16.2
+  HARBOR_STORAGE_CLASS=linstor-lvm-r1
+  HARBOR_ADMIN_PASSWORD=Harbor12345
+  HARBOR_DOMAIN=harbor.cure.dev
+
+  # Monitoring
+  MONITORING_VERSION=72.6.2
+  GRAFANA_ADMIN_PASSWORD=admin
+
   # Destructive flags (OFF by default)
   WIPE_DISKS=1            # talosctl wipe disk <id> on each worker's DEFAULT_DEVICE/DEVICE_MAP disk
   RESET_LINSTOR_DB=1      # reset-piraeus also deletes internal.linstor.linbit.com CRs
@@ -1544,6 +1853,8 @@ Common env overrides:
   # Skip steps
   SKIP_TERRAFORM=1
   SKIP_PIRAEUS=1
+  SKIP_INGRESS=1          # Skip Traefik deployment
+  SKIP_HARBOR=1           # Skip Harbor deployment
 
 Generated files:
   kubeconfig (raw):     $KUBECONFIG_RAW_OUT
@@ -1556,12 +1867,17 @@ USAGE
 main() {
   local cmd="${1:-}"
   case "$cmd" in
-    plan)         cmd_plan ;;
-    apply)        cmd_apply ;;
-    plan-apply)   cmd_plan_apply ;;
-    destroy)      cmd_destroy ;;
-    reset-piraeus) cmd_reset_piraeus ;;
-    reset-all)     cmd_reset_all ;;
+    plan)              cmd_plan ;;
+    apply)             cmd_apply ;;
+    plan-apply)        cmd_plan_apply ;;
+    destroy)           cmd_destroy ;;
+    reset-piraeus)     cmd_reset_piraeus ;;
+    reset-all)         cmd_reset_all ;;
+    deploy-traefik)    ensure_kubeconfig && deploy_traefik ;;
+    deploy-harbor)     ensure_kubeconfig && deploy_harbor ;;
+    deploy-monitoring) ensure_kubeconfig && deploy_monitoring ;;
+    info)              ensure_kubeconfig && print_access_info ;;
+    test|tests)        ensure_kubeconfig && load_cluster_vars && run_all_tests ;;
     ""|-h|--help|help) usage ;;
     *) die "unknown command: $cmd" ;;
   esac

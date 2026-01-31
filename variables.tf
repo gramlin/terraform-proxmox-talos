@@ -195,3 +195,90 @@ variable "worker_data_disk_size_gb" {
   type        = number
   default     = 80
 }
+
+# =============================================================================
+# Traefik Configuration
+# =============================================================================
+
+variable "traefik_replicas" {
+  description = "Number of Traefik replicas"
+  type        = number
+  default     = 2
+}
+
+variable "traefik_load_balancer_ip" {
+  description = "Static IP for Traefik LoadBalancer (from Cilium LB pool)"
+  type        = string
+  default     = "192.168.190.130"
+}
+
+variable "traefik_dashboard_enabled" {
+  description = "Enable Traefik dashboard"
+  type        = bool
+  default     = true
+}
+
+# =============================================================================
+# Harbor Configuration
+# =============================================================================
+
+variable "harbor_storage_class" {
+  description = "StorageClass for Harbor persistent volumes"
+  type        = string
+  default     = "linstor-lvm-r1"
+}
+
+variable "harbor_registry_size" {
+  description = "Size of Harbor registry storage"
+  type        = string
+  default     = "50Gi"
+}
+
+variable "harbor_database_size" {
+  description = "Size of Harbor database storage"
+  type        = string
+  default     = "5Gi"
+}
+
+variable "harbor_redis_size" {
+  description = "Size of Harbor Redis storage"
+  type        = string
+  default     = "1Gi"
+}
+
+variable "harbor_trivy_size" {
+  description = "Size of Harbor Trivy storage"
+  type        = string
+  default     = "5Gi"
+}
+
+variable "harbor_jobservice_size" {
+  description = "Size of Harbor Job Service storage"
+  type        = string
+  default     = "1Gi"
+}
+
+variable "harbor_admin_password" {
+  description = "Harbor admin password"
+  type        = string
+  default     = "Harbor12345"
+  sensitive   = true
+}
+
+variable "harbor_trivy_enabled" {
+  description = "Enable Trivy vulnerability scanner"
+  type        = bool
+  default     = true
+}
+
+variable "harbor_notary_enabled" {
+  description = "Enable Notary for image signing"
+  type        = bool
+  default     = false
+}
+
+variable "harbor_metrics_enabled" {
+  description = "Enable Prometheus metrics"
+  type        = bool
+  default     = true
+}
