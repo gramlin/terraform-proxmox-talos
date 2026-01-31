@@ -21,6 +21,20 @@ set -euo pipefail
 # -----------------------------
 WORKDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# Piraeus versions - tested combinations for Talos:
+#   PIRAEUS_OPERATOR_VERSION=2.9.0 + LINSTOR_IMAGE_VERSION=1.28.0 (stable)
+#   PIRAEUS_OPERATOR_VERSION=2.10.4 + LINSTOR_IMAGE_VERSION=1.32.3 (latest, may have issues)
+#
+# Version fallback: if not explicitly set, will try multiple versions automatically
+if [[ -z "${PIRAEUS_OPERATOR_VERSION:-}" && -z "${LINSTOR_IMAGE_VERSION:-}" ]]; then
+  PIRAEUS_VERSION_FALLBACK_ENABLED=1
+  # Versions to try (operator:linstor pairs)
+  PIRAEUS_VERSION_CANDIDATES=("2.10.4:1.32.3" "2.9.0:1.28.0" "2.8.0:1.27.1")
+  CURRENT_VERSION_INDEX=0
+else
+  PIRAEUS_VERSION_FALLBACK_ENABLED=0
+fi
+
 PIRAEUS_OPERATOR_VERSION="${PIRAEUS_OPERATOR_VERSION:-2.10.4}"
 LINSTOR_IMAGE_VERSION="${LINSTOR_IMAGE_VERSION:-1.32.3}"
 
@@ -478,7 +492,30 @@ YAML
 
 
 render_linstorcluster() {
-  cat <<YAML
+  # Different Piraeus versions have different API schemas
+  local operator_major_minor
+  operator_major_minor="$(echo "$PIRAEUS_OPERATOR_VERSION" | cut -d. -f1-2)"
+  
+  # Version 2.9.x and older don't support csiController.replicas
+  if [[ "$operator_major_minor" == "2.9" || "$operator_major_minor" == "2.8" ]]; then
+    cat <<YAML
+apiVersion: piraeus.io/v1
+kind: LinstorCluster
+metadata:
+  name: linstor
+spec:
+  controller:
+    podTemplate:
+      spec:
+        containers:
+          - name: linstor-controller
+            image: quay.io/piraeusdatastore/piraeus-server:${LINSTOR_IMAGE_VERSION}
+  csiNode:
+    enabled: true
+YAML
+  else
+    # Version 2.10+ supports csiController.replicas
+    cat <<YAML
 apiVersion: piraeus.io/v1
 kind: LinstorCluster
 metadata:
@@ -495,6 +532,7 @@ spec:
   csiNode:
     enabled: true
 YAML
+  fi
 }
 
 render_storageclass() {
@@ -528,6 +566,63 @@ reset_linstor_internal_db() {
   fi
 }
 
+load_next_piraeus_version() {
+  # Load next version from fallback candidates
+  if [[ "$PIRAEUS_VERSION_FALLBACK_ENABLED" != "1" ]]; then
+    return 1  # No fallback available
+  fi
+  
+  if [[ "$CURRENT_VERSION_INDEX" -ge "${#PIRAEUS_VERSION_CANDIDATES[@]}" ]]; then
+    return 1  # No more versions to try
+  fi
+  
+  local version_pair="${PIRAEUS_VERSION_CANDIDATES[$CURRENT_VERSION_INDEX]}"
+  PIRAEUS_OPERATOR_VERSION="${version_pair%:*}"
+  LINSTOR_IMAGE_VERSION="${version_pair#*:}"
+  CURRENT_VERSION_INDEX=$((CURRENT_VERSION_INDEX + 1))
+  
+  info "Trying Piraeus version: Operator=$PIRAEUS_OPERATOR_VERSION, Linstor=$LINSTOR_IMAGE_VERSION"
+  return 0
+}
+
+diagnose_pod_issues() {
+  # Check for common pod startup issues and provide actionable feedback
+  local ns="piraeus-datastore"
+  
+  info "Diagnosing pod issues in $ns..."
+  
+  # Check for ImagePullBackOff
+  local image_pull_errors
+  image_pull_errors=$(kubectl -n "$ns" get pods -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.containerStatuses[*].state.waiting.reason}{"\n"}{end}' 2>/dev/null | grep -i "ImagePullBackOff\|ErrImagePull" || true)
+  
+  if [[ -n "$image_pull_errors" ]]; then
+    warn "Found ImagePullBackOff errors:"
+    echo "$image_pull_errors"
+    warn ""
+    warn "This usually means:"
+    warn "  1. The image registry (quay.io) is unreachable from your cluster"
+    warn "  2. The image version doesn't exist"
+    warn "  3. Rate limiting from the registry"
+    warn ""
+    warn "Possible solutions:"
+    warn "  - Check cluster has internet access: kubectl run -it --rm debug --image=busybox --restart=Never -- wget -O- https://quay.io"
+    warn "  - Try an older Piraeus version: PIRAEUS_OPERATOR_VERSION=2.9.0 LINSTOR_IMAGE_VERSION=1.28.0 ./do apply"
+    warn "  - Configure an image pull secret if using a private registry"
+    return 1
+  fi
+  
+  # Check for Init container issues
+  local init_errors
+  init_errors=$(kubectl -n "$ns" get pods -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.initContainerStatuses[*].state.waiting.reason}{"\n"}{end}' 2>/dev/null | grep -v "^$" | grep -v "PodInitializing" || true)
+  
+  if [[ -n "$init_errors" ]]; then
+    warn "Found Init container errors:"
+    echo "$init_errors"
+  fi
+  
+  return 0
+}
+
 wait_linstor_ready() {
   step "piraeus wait datastore"
   # Wait for LinstorCluster to become Available (controller reachable).
@@ -540,6 +635,11 @@ wait_linstor_ready() {
 
     warn "LinstorCluster did not become Available within timeout. Dumping diagnostics."
     kubectl -n piraeus-datastore get pods -o wide || true
+    
+    # Run diagnostics
+    local has_image_issues=0
+    diagnose_pod_issues || has_image_issues=$?
+    
     kubectl -n piraeus-datastore describe linstorcluster.piraeus.io/linstor || true
     kubectl -n piraeus-datastore get linstorcluster.piraeus.io/linstor -o yaml || true
 
@@ -548,12 +648,32 @@ wait_linstor_ready() {
     [[ -n "$controller_logs" ]] && echo "$controller_logs"
     kubectl -n piraeus-datastore logs -l app.kubernetes.io/component=linstor-satellite --all-containers --tail=200 || true
 
+    # Check for DB migration issues first
     if [[ "$AUTO_RESET_LINSTOR_DB" == "1" && "$attempt" -eq 1 ]]; then
       if echo "$controller_logs" | grep -qiE 'rollback has to be done|Database initialization error|Cannot perform Migration'; then
         warn "Detected LINSTOR DB migration failure. Resetting internal DB and retrying once."
         reset_linstor_internal_db
         kubectl -n piraeus-datastore delete pod -l app.kubernetes.io/component=linstor-controller --ignore-not-found >/dev/null 2>&1 || true
         attempt=$((attempt + 1))
+        sleep 10
+        continue
+      fi
+    fi
+
+    # Check for image pull issues and try fallback version
+    if [[ "$has_image_issues" -eq 1 && "$PIRAEUS_VERSION_FALLBACK_ENABLED" == "1" ]]; then
+      if load_next_piraeus_version; then
+        warn "Image pull failed. Retrying with older Piraeus version..."
+        warn "Cleaning up failed installation..."
+        kubectl delete linstorcluster linstor --ignore-not-found >/dev/null 2>&1 || true
+        kubectl delete linstorsatelliteconfigurations.piraeus.io --all --ignore-not-found >/dev/null 2>&1 || true
+        kubectl -n piraeus-datastore delete pods --all --ignore-not-found >/dev/null 2>&1 || true
+        sleep 5
+        
+        # Reinstall with new version
+        piraeus_apply_cluster_resources
+        attempt=1
+        sleep 10
         continue
       fi
     fi
