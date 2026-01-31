@@ -358,6 +358,201 @@ validate_worker_data_disks() {
   done
 }
 
+# ===== VALIDATION/TESTING FUNCTIONS =====
+
+test_drbd_modules_loaded() {
+  # Verify DRBD kernel modules are loaded on all worker nodes
+  step "TEST: Verify DRBD modules on worker nodes"
+  [[ "${#WORKERS[@]}" -gt 0 ]] || { info "No workers to test"; return 0; }
+  need talosctl
+
+  local i ip node all_ok=1
+  for i in "${!WORKERS[@]}"; do
+    ip="${WORKERS[$i]}"
+    node="${WORKER_NODE_NAMES[$i]:-worker-$i}"
+    
+    if talosctl -n "$ip" read /proc/modules 2>/dev/null | grep -q "^drbd "; then
+      info "  ✓ $node: DRBD modules loaded"
+    else
+      warn "  ✗ $node: DRBD modules NOT found"
+      all_ok=0
+    fi
+  done
+  
+  [[ $all_ok -eq 1 ]] && info "✓ All workers have DRBD modules" || warn "⚠ Some workers missing DRBD modules"
+  return 0
+}
+
+test_lvm_init_daemonset() {
+  # Verify LVM init DaemonSet deployed and pods running
+  step "TEST: Verify LVM init DaemonSet"
+  
+  local ds_ready
+  ds_ready=$(kubectl get daemonset -n piraeus-datastore lvm-init -o jsonpath='{.status.numberReady}' 2>/dev/null || echo "0")
+  local ds_desired
+  ds_desired=$(kubectl get daemonset -n piraeus-datastore lvm-init -o jsonpath='{.status.desiredNumberScheduled}' 2>/dev/null || echo "0")
+  
+  if [[ "$ds_ready" -eq "$ds_desired" ]] && [[ "$ds_desired" -gt 0 ]]; then
+    info "  ✓ LVM init DaemonSet: $ds_ready/$ds_desired pods ready"
+    
+    # Check if thin pool was created
+    info "  Checking thin pool creation..."
+    for i in "${!WORKERS[@]}"; do
+      local ip="${WORKERS[$i]}"
+      if talosctl -n "$ip" read /proc/devices 2>/dev/null | grep -q "device-mapper"; then
+        info "    ✓ Worker $ip has device-mapper (LVM running)"
+      else
+        warn "    ⚠ Worker $ip may not have LVM active"
+      fi
+    done
+  else
+    warn "  ⚠ LVM init DaemonSet: $ds_ready/$ds_desired pods ready (expected $ds_desired)"
+  fi
+  return 0
+}
+
+test_satellite_readiness() {
+  # Verify satellites are Running and Ready
+  step "TEST: Verify satellite pod status"
+  
+  local running
+  running=$(kubectl get pods -n piraeus-datastore -l app.kubernetes.io/component=linstor-satellite -o jsonpath='{range .items[?(@.status.phase=="Running")]}{.metadata.name}{"\n"}{end}' 2>/dev/null | wc -l)
+  local ready
+  ready=$(kubectl get pods -n piraeus-datastore -l app.kubernetes.io/component=linstor-satellite -o jsonpath='{range .items[?(@.status.conditions[?(@.type=="Ready")].status=="True")]}{.metadata.name}{"\n"}{end}' 2>/dev/null | wc -l)
+  local total
+  total=$(kubectl get pods -n piraeus-datastore -l app.kubernetes.io/component=linstor-satellite --no-headers 2>/dev/null | wc -l)
+  
+  if [[ $running -eq $total ]]; then
+    info "  ✓ All $total satellites Running"
+  else
+    warn "  ⚠ Only $running/$total satellites Running"
+  fi
+  
+  if [[ $ready -eq $total ]]; then
+    info "  ✓ All $total satellites Ready"
+    return 0
+  else
+    warn "  ⚠ Only $ready/$total satellites Ready"
+    return 1
+  fi
+}
+
+test_linstor_nodes_registered() {
+  # Verify all nodes registered with LINSTOR controller
+  step "TEST: Verify LINSTOR nodes registered"
+  
+  local controller_pod
+  controller_pod=$(kubectl -n piraeus-datastore get pod -l app.kubernetes.io/component=linstor-controller -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+  
+  if [[ -z "$controller_pod" ]]; then
+    warn "  ⚠ No LINSTOR controller pod found"
+    return 1
+  fi
+  
+  local registered_nodes
+  registered_nodes=$(kubectl -n piraeus-datastore exec "$controller_pod" -- linstor node list 2>/dev/null | grep -c "SATELLITE" || echo "0")
+  local expected_nodes=${#WORKER_NODE_NAMES[@]}
+  
+  if [[ $registered_nodes -eq $expected_nodes ]]; then
+    info "  ✓ All $registered_nodes nodes registered"
+    kubectl -n piraeus-datastore exec "$controller_pod" -- linstor node list 2>/dev/null | head -10
+    return 0
+  else
+    warn "  ⚠ Only $registered_nodes/$expected_nodes nodes registered"
+    return 1
+  fi
+}
+
+test_storage_pools_created() {
+  # Verify storage pools exist on all nodes
+  step "TEST: Verify storage pools created"
+  
+  local controller_pod
+  controller_pod=$(kubectl -n piraeus-datastore get pod -l app.kubernetes.io/component=linstor-controller -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+  
+  if [[ -z "$controller_pod" ]]; then
+    warn "  ⚠ No LINSTOR controller pod found"
+    return 1
+  fi
+  
+  local pool_count
+  pool_count=$(kubectl -n piraeus-datastore exec "$controller_pod" -- linstor storage-pool list 2>/dev/null | grep -c "lvm" || echo "0")
+  
+  if [[ $pool_count -gt 0 ]]; then
+    info "  ✓ Found $pool_count storage pools"
+    kubectl -n piraeus-datastore exec "$controller_pod" -- linstor storage-pool list 2>/dev/null
+    return 0
+  else
+    warn "  ⚠ No storage pools found"
+    return 1
+  fi
+}
+
+test_pvc_provisioning() {
+  # Verify PVC can be created and bound
+  step "TEST: Verify PVC provisioning"
+  
+  local test_pvc="test-pvc-$(date +%s)"
+  local test_ns="piraeus-datastore"
+  
+  # Create test PVC
+  info "  Creating test PVC: $test_pvc"
+  kubectl apply -n "$test_ns" -f - <<EOF
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: $test_pvc
+spec:
+  storageClassName: $STORAGECLASS_NAME
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 100Mi
+EOF
+  
+  if [[ $? -ne 0 ]]; then
+    warn "  ⚠ Failed to create test PVC"
+    return 1
+  fi
+  
+  # Wait for binding
+  if kubectl wait -n "$test_ns" pvc "$test_pvc" --for=jsonpath='{.status.phase}'=Bound --timeout=30s 2>/dev/null; then
+    info "  ✓ PVC bound successfully"
+    kubectl get pvc -n "$test_ns" "$test_pvc"
+    kubectl delete pvc -n "$test_ns" "$test_pvc" --ignore-not-found=true
+    return 0
+  else
+    warn "  ⚠ PVC failed to bind within 30s"
+    kubectl describe pvc -n "$test_ns" "$test_pvc" 2>/dev/null | grep -A 5 "Events:" || true
+    kubectl delete pvc -n "$test_ns" "$test_pvc" --ignore-not-found=true
+    return 1
+  fi
+}
+
+run_all_tests() {
+  # Run all validation tests
+  step "Running comprehensive validation tests"
+  
+  local failed=0
+  
+  test_drbd_modules_loaded || failed=$((failed + 1))
+  test_lvm_init_daemonset || failed=$((failed + 1))
+  test_satellite_readiness || failed=$((failed + 1))
+  test_linstor_nodes_registered || failed=$((failed + 1))
+  test_storage_pools_created || failed=$((failed + 1))
+  test_pvc_provisioning || failed=$((failed + 1))
+  
+  echo ""
+  if [[ $failed -eq 0 ]]; then
+    info "✓✓✓ ALL TESTS PASSED ✓✓✓"
+    return 0
+  else
+    warn "⚠ $failed tests failed"
+    return 1
+  fi
+}
+
 wipe_worker_disks() {
   [[ "$WIPE_DISKS" == "1" ]] || return 0
   [[ "${#WORKERS[@]}" -gt 0 ]] || return 0
@@ -396,21 +591,55 @@ configure_linstor_storage_pools() {
     return 0
   fi
 
+  info "=== LINSTOR Storage Pool Configuration Debug ==="
+  info "Controller pod: $linstor_pod"
+  
+  # Debug: Check nodes are registered
+  info "DEBUG: Registered LINSTOR nodes..."
+  kubectl -n piraeus-datastore exec "$linstor_pod" -- linstor node list 2>&1 | tee /tmp/linstor-nodes.log || true
+  
+  # Debug: Check storage providers
+  info "DEBUG: Satellite capabilities..."
+  kubectl -n piraeus-datastore exec "$linstor_pod" -- linstor node list 2>&1 | tee /tmp/linstor-providers.log || true
+  
+  # Debug: Check LVM init DaemonSet status
+  info "DEBUG: LVM init DaemonSet status..."
+  kubectl get daemonset -n piraeus-datastore lvm-init -o wide 2>&1 | tee /tmp/lvm-init-ds.log || true
+  kubectl get pods -n piraeus-datastore -l app=lvm-init -o wide 2>&1 | tee /tmp/lvm-init-pods.log || true
+  
+  # Debug: Check LVM init pod logs
+  info "DEBUG: LVM init pod logs (last 50 lines from each)..."
+  kubectl logs -n piraeus-datastore -l app=lvm-init --tail=50 2>&1 | tee /tmp/lvm-init-logs.log || true
+  
+  info "DEBUG: Starting storage pool creation..."
+
   for i in "${!WORKER_NODE_NAMES[@]}"; do
     node="${WORKER_NODE_NAMES[$i]}"
     dev="$(device_for_node "$node")"
 
-    info "Configuring storage pool on node $node"
+    info "DEBUG: Processing node $node (device: $dev)"
     
-    # Create storage pool using the thin pool created by lvm-init init container
-    # Format: linstor storage-pool create <provider> <node> <pool-name> <thin-pool-path>
-    kubectl -n piraeus-datastore exec "$linstor_pod" -- linstor \
-      storage-pool create lvmthin "$node" "${POOL_NAME}" "linstor-vg/${POOL_NAME}" || {
-        warn "Failed to create storage pool on $node, may already exist or device not ready"
-      }
+    # Check if node is ONLINE
+    local node_status
+    node_status=$(kubectl -n piraeus-datastore exec "$linstor_pod" -- linstor node list -n "$node" 2>&1 | grep -i "online\|error" || echo "UNKNOWN")
+    info "  Node status: $node_status"
+    
+    info "  Creating storage pool: linstor storage-pool create lvmthin $node ${POOL_NAME} linstor-vg/${POOL_NAME}"
+    if kubectl -n piraeus-datastore exec "$linstor_pod" -- linstor \
+      storage-pool create lvmthin "$node" "${POOL_NAME}" "linstor-vg/${POOL_NAME}" 2>&1 | tee -a /tmp/linstor-pool-create.log; then
+      info "  ✓ Storage pool created successfully"
+    else
+      warn "  ✗ Failed to create storage pool"
+      warn "  DEBUG: Full pool list:"
+      kubectl -n piraeus-datastore exec "$linstor_pod" -- linstor storage-pool list 2>&1 | tee -a /tmp/linstor-pools.log || true
+    fi
   done
   
   info "Storage pool configuration complete"
+  info "DEBUG: Final storage pool list:"
+  kubectl -n piraeus-datastore exec "$linstor_pod" -- linstor storage-pool list 2>&1 | tee /tmp/linstor-final-pools.log || true
+  
+  info "DEBUG: Saved diagnostics to /tmp/linstor-*.log"
 }
 
 # -----------------------------
@@ -480,14 +709,12 @@ piraeus_relax_webhooks() {
 }
 
 render_storage_pool_configs() {
-  # Talos-specific satellite configuration with LVM initialization
+  # Talos-specific satellite configuration
   # Based on official docs: https://piraeus.io/docs/stable/how-to/talos/
   # 
-  # Talos doesn't use systemd, so we need to remove systemd-related volumes
-  # and init containers. DRBD modules are already loaded from Talos system
-  # extension, so module loaders are not needed.
-  #
-  # We add an init container to prepare LVM thin pool on the device.
+  # Talos doesn't use systemd, so we remove systemd-related volumes and init containers.
+  # DRBD modules are already loaded from Talos system extension.
+  # LVM thin pool is initialized by separate lvm-init DaemonSet on worker nodes.
   
   cat <<'YAML'
 apiVersion: piraeus.io/v1
@@ -502,52 +729,6 @@ spec:
           $patch: delete
         - name: drbd-module-loader
           $patch: delete
-        - name: lvm-init
-          image: quay.io/piraeusdatastore/piraeus-server:v1.32.3
-          securityContext:
-            privileged: true
-          command:
-            - /bin/sh
-            - -c
-            - |
-              set -e
-              DEVICE="/dev/sdb"
-              VG_NAME="linstor-vg"
-              POOL_NAME="linstor-thinpool"
-              
-              if [ ! -b "$DEVICE" ]; then
-                echo "Device $DEVICE not found, skipping LVM initialization"
-                exit 0
-              fi
-              
-              # Check if PV already exists
-              if pvs "$DEVICE" 2>/dev/null; then
-                echo "PV already exists on $DEVICE, skipping initialization"
-                exit 0
-              fi
-              
-              echo "Initializing LVM on $DEVICE..."
-              pvcreate -f "$DEVICE" || true
-              
-              if vgdisplay "$VG_NAME" 2>/dev/null; then
-                echo "VG $VG_NAME already exists"
-              else
-                echo "Creating VG $VG_NAME..."
-                vgcreate "$VG_NAME" "$DEVICE"
-              fi
-              
-              if lvdisplay "$VG_NAME/$POOL_NAME" 2>/dev/null; then
-                echo "Thin pool $VG_NAME/$POOL_NAME already exists"
-              else
-                echo "Creating thin pool $VG_NAME/$POOL_NAME..."
-                lvcreate -L 100G -T "$VG_NAME/$POOL_NAME"
-              fi
-              
-              echo "LVM initialization complete"
-          volumeMounts:
-            - name: host-dev
-              mountPath: /dev
-              mountPropagation: Bidirectional
       volumes:
         - name: run-systemd-system
           $patch: delete
@@ -559,10 +740,6 @@ spec:
           $patch: delete
         - name: usr-src
           $patch: delete
-        - name: host-dev
-          hostPath:
-            path: /dev
-            type: Directory
         - name: etc-lvm-backup
           hostPath:
             path: /var/etc/lvm/backup
@@ -637,11 +814,160 @@ volumeBindingMode: WaitForFirstConsumer
 YAML
 }
 
+render_lvm_init_daemonset() {
+  # DaemonSet to initialize LVM on worker nodes
+  # Runs on host with direct /dev access to create thin pools
+  cat <<'YAML'
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: lvm-init
+  namespace: piraeus-datastore
+  labels:
+    app: lvm-init
+spec:
+  selector:
+    matchLabels:
+      app: lvm-init
+  template:
+    metadata:
+      labels:
+        app: lvm-init
+    spec:
+      hostNetwork: true
+      hostPID: true
+      priorityClassName: system-node-critical
+      tolerations:
+        - operator: Exists
+      nodeSelector:
+        node-role.kubernetes.io/worker: ""
+      containers:
+        - name: lvm-init
+          image: alpine:latest
+          securityContext:
+            privileged: true
+            runAsUser: 0
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -e
+              DEVICE="/dev/sdb"
+              VG_NAME="linstor-vg"
+              POOL_NAME="linstor-thinpool"
+              HOSTNAME=$(hostname)
+              
+              echo "=========================================="
+              echo "LVM Init: Starting on $HOSTNAME at $(date)"
+              echo "  Device: $DEVICE"
+              echo "  VG: $VG_NAME"
+              echo "  Thin Pool: $POOL_NAME"
+              echo "=========================================="
+              
+              # Check device exists
+              if [ ! -b "$DEVICE" ]; then
+                echo "ERROR: Device $DEVICE not found on $HOSTNAME"
+                echo "Available block devices:"
+                lsblk || ls -la /dev/ | grep "^b"
+                exit 1
+              fi
+              
+              echo "✓ Device $DEVICE found"
+              echo "  Device info:"
+              ls -lh "$DEVICE"
+              
+              # Install LVM tools if not present
+              if ! command -v pvcreate &> /dev/null; then
+                echo "Installing lvm2..."
+                apk add --no-cache lvm2 2>&1 | head -5
+              else
+                echo "✓ LVM tools already installed"
+              fi
+              
+              # Check if PV already exists
+              echo "Checking for existing PV on $DEVICE..."
+              if pvdisplay "$DEVICE" 2>&1; then
+                echo "✓ PV already exists on $DEVICE"
+              else
+                echo "Creating PV on $DEVICE..."
+                pvcreate -f --override -y "$DEVICE"
+                echo "✓ PV created"
+              fi
+              
+              # Check/create VG
+              echo "Checking for VG $VG_NAME..."
+              if vgdisplay "$VG_NAME" 2>&1; then
+                echo "✓ VG $VG_NAME already exists"
+              else
+                echo "Creating VG $VG_NAME..."
+                vgcreate "$VG_NAME" "$DEVICE"
+                echo "✓ VG created"
+              fi
+              
+              # Check/create thin pool
+              echo "Checking for thin pool $VG_NAME/$POOL_NAME..."
+              if lvdisplay "$VG_NAME/$POOL_NAME" 2>&1; then
+                echo "✓ Thin pool $VG_NAME/$POOL_NAME already exists"
+              else
+                echo "Creating thin pool $VG_NAME/$POOL_NAME (100G)..."
+                lvcreate -L 100G -T "$VG_NAME/$POOL_NAME"
+                echo "✓ Thin pool created"
+              fi
+              
+              echo "=========================================="
+              echo "LVM Init: Complete on $HOSTNAME"
+              echo "Final state:"
+              echo "PVs:"
+              pvs
+              echo ""
+              echo "VGs:"
+              vgs
+              echo ""
+              echo "LVs:"
+              lvs
+              echo "=========================================="
+              
+              # Keep running to keep pod alive
+              while true; do
+                sleep 60
+                echo "LVM Init: Still running on $HOSTNAME - $(date)"
+              done
+                  echo "LVM Init: VG creation failed, may already exist"
+                }
+              fi
+              
+              # Check/create thin pool
+              if lvdisplay "$VG_NAME/$POOL_NAME" 2>&1 | grep -q "found"; then
+                echo "LVM Init: Thin pool $VG_NAME/$POOL_NAME already exists"
+              else
+                echo "LVM Init: Creating thin pool $VG_NAME/$POOL_NAME (100G)"
+                lvcreate -L 100G -T "$VG_NAME/$POOL_NAME" || {
+                  echo "LVM Init: Thin pool creation failed, may already exist"
+                }
+              fi
+              
+              echo "LVM Init: Complete on $(hostname)"
+              
+              # Keep running to keep pod alive
+              sleep infinity
+          volumeMounts:
+            - name: host-root
+              mountPath: /host
+              mountPropagation: Bidirectional
+      volumes:
+        - name: host-root
+          hostPath:
+            path: /
+            type: Directory
+YAML
+}
+
 piraeus_apply_cluster_resources() {
   step "piraeus configure"
-  render_storage_pool_configs | kubectl apply -f -
-  render_linstorcluster         | kubectl apply -f -
-  render_storageclass           | kubectl apply -f -
+  render_lvm_init_daemonset       | kubectl apply -f -
+  render_storage_pool_configs     | kubectl apply -f -
+  render_linstorcluster           | kubectl apply -f -
+  render_storageclass             | kubectl apply -f -
 }
 
 reset_linstor_internal_db() {
@@ -788,6 +1114,13 @@ wait_satellites_ready() {
   local max_retries=2
   
   while [[ $retry_count -le $max_retries ]]; do
+    # Show current status
+    info "DEBUG: Satellite pod status (attempt $((retry_count + 1))/$((max_retries + 1))):"
+    kubectl -n piraeus-datastore get pods -l app.kubernetes.io/component=linstor-satellite -o wide 2>/dev/null | tee /tmp/satellite-status.log || true
+    
+    info "DEBUG: Checking pod conditions..."
+    kubectl -n piraeus-datastore get pods -l app.kubernetes.io/component=linstor-satellite -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.conditions[*].status}{"\n"}{end}' 2>/dev/null | tee /tmp/satellite-conditions.log || true
+    
     # Try waiting for satellites
     if kubectl -n piraeus-datastore wait pod -l app.kubernetes.io/component=linstor-satellite --for=condition=Ready --timeout="$WAIT_SATELLITE_PODS_TIMEOUT" 2>/dev/null; then
       info "✓ Satellites are Ready"
@@ -797,25 +1130,40 @@ wait_satellites_ready() {
     retry_count=$((retry_count + 1))
     
     if [[ $retry_count -le $max_retries ]]; then
-      warn "Satellites not Ready (attempt $retry_count/$max_retries). Attempting restart..."
+      warn "Satellites not Ready (attempt $retry_count/$max_retries). Showing diagnostics..."
+      kubectl -n piraeus-datastore describe pods -l app.kubernetes.io/component=linstor-satellite 2>&1 | tee /tmp/satellite-describe.log | grep -A 10 "Events:" || true
+      warn "Attempting restart..."
       patch_satellites_for_talos
       sleep 10
     fi
   done
   
-  # Not ready after retries - show diagnostics and continue anyway
+  # Not ready after retries - show detailed diagnostics and continue anyway
   warn "Satellites still not Ready after $max_retries restart attempts."
   warn ""
-  warn "Known Issue: Piraeus expects systemd but Talos is immutable and doesn't use systemd."
-  warn "Satellite init containers fail on mount of /run/systemd/system/ which doesn't exist."
-  warn ""
+  warn "=== SATELLITE DIAGNOSTICS ==="
   warn "Recent pod status:"
-  kubectl -n piraeus-datastore get pods -l app.kubernetes.io/component=linstor-satellite -o wide 2>/dev/null || true
+  kubectl -n piraeus-datastore get pods -l app.kubernetes.io/component=linstor-satellite -o wide 2>&1 | tee /tmp/satellite-final-status.log || true
+  
   warn ""
-  warn "Storage may still become available - Kubernetes may recover from these mount errors."
-  warn "You can monitor progress with:"
+  warn "Pod descriptions (last 30 lines each):"
+  kubectl -n piraeus-datastore describe pods -l app.kubernetes.io/component=linstor-satellite 2>&1 | tail -100 | tee /tmp/satellite-final-describe.log || true
+  
+  warn ""
+  warn "Satellite container logs:"
+  kubectl -n piraeus-datastore logs -l app.kubernetes.io/component=linstor-satellite --all-containers=true --tail=20 2>&1 | tee /tmp/satellite-logs.log || true
+  
+  warn ""
+  warn "Known Issues on Talos:"
+  warn "  - /run/systemd/system/ doesn't exist (Talos uses minimal init)"
+  warn "  - Init containers may fail on systemd-related mounts"
+  warn "  - Force-delete helps pods restart and work around issues"
+  warn ""
+  warn "Monitoring:"
   warn "  kubectl get pods -n piraeus-datastore -w"
+  warn "  kubectl logs -n piraeus-datastore -l app.kubernetes.io/component=linstor-satellite -f"
   warn ""
+  warn "All diagnostics saved to /tmp/satellite-*.log"
   info "Continuing with deployment anyway..."
   return 0
 }
@@ -1003,18 +1351,28 @@ post_apply_pipeline() {
 
   piraeus_install_operator
   piraeus_wait_operator
+  test_lvm_init_daemonset
+  
   piraeus_relax_webhooks
   piraeus_apply_cluster_resources
   wait_linstor_ready
   wait_satellites_ready
+  test_satellite_readiness
+  test_linstor_nodes_registered
   
   # Configure storage pools via LINSTOR API after satellites are ready
   configure_linstor_storage_pools
+  test_storage_pools_created
+  
   storage_smoke_test
+  test_pvc_provisioning
   export_ingress_ca
 
   step "cluster nodes"
   kubectl get nodes -o wide || true
+
+  step "Test summary"
+  run_all_tests
 
   step "done"
   info "Lens-friendly kubeconfig: $KUBECONFIG_LENS_OUT"
