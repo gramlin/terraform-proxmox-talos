@@ -484,47 +484,46 @@ piraeus_relax_webhooks() {
 }
 
 render_storage_pool_configs() {
-  # Generate one LinstorSatelliteConfiguration PER worker node.
-  # This avoids brittle selectors and scales with any number of workers.
-  # It also allows per-node disk overrides via DEVICE_MAP.
-  #
-  # Names are derived from node names; we keep them DNS-1123 friendly.
-  [[ "${#WORKER_NODE_NAMES[@]}" -gt 0 ]] || { warn "No workers; skipping storage pool config"; return 0; }
-
-  local i node dev cfg_name
-  for i in "${!WORKER_NODE_NAMES[@]}"; do
-    node="${WORKER_NODE_NAMES[$i]}"
-    dev="$(device_for_node "$node")"
-    cfg_name="talos-loader-${node}"
-
-    cat <<YAML
+  # Talos-specific satellite configuration
+  # Based on official docs: https://piraeus.io/docs/stable/how-to/talos/
+  # 
+  # Talos doesn't use systemd, so we need to remove systemd-related volumes
+  # and init containers. DRBD modules are already loaded from Talos system
+  # extension, so module loaders are not needed.
+  
+  cat <<'YAML'
 apiVersion: piraeus.io/v1
 kind: LinstorSatelliteConfiguration
 metadata:
-  name: ${cfg_name}
+  name: talos-loader-override
 spec:
-  nodeSelector:
-    kubernetes.io/hostname: "${node}"
   podTemplate:
     spec:
-      # Talos uses readonly rootfs; the Talos loader enables needed tooling.
       initContainers:
-        - name: talos-loader
-          image: quay.io/piraeusdatastore/piraeus-talos-loader:v0.7.0
-          securityContext:
-            privileged: true
-      containers:
-        - name: linstor-satellite
-          image: quay.io/piraeusdatastore/piraeus-server:${LINSTOR_IMAGE_VERSION}
-          securityContext:
-            privileged: true
-        - name: drbd-reactor
-          image: quay.io/piraeusdatastore/drbd-reactor:v1.10.0
-          securityContext:
-            privileged: true
----
+        - name: drbd-shutdown-guard
+          $patch: delete
+        - name: drbd-module-loader
+          $patch: delete
+      volumes:
+        - name: run-systemd-system
+          $patch: delete
+        - name: run-drbd-shutdown-guard
+          $patch: delete
+        - name: systemd-bus-socket
+          $patch: delete
+        - name: lib-modules
+          $patch: delete
+        - name: usr-src
+          $patch: delete
+        - name: etc-lvm-backup
+          hostPath:
+            path: /var/etc/lvm/backup
+            type: DirectoryOrCreate
+        - name: etc-lvm-archive
+          hostPath:
+            path: /var/etc/lvm/archive
+            type: DirectoryOrCreate
 YAML
-  done
 }
 
 
@@ -553,6 +552,7 @@ spec:
 YAML
   else
     # Version 2.10+ supports csiController.replicas
+    # Add Talos-specific workaround: avoid systemd-related volume mounts
     cat <<YAML
 apiVersion: piraeus.io/v1
 kind: LinstorCluster
