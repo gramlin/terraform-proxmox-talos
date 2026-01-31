@@ -12,6 +12,56 @@ locals {
       address = cidrhost(var.cluster_node_network, var.cluster_node_network_first_worker_hostnum + i)
     }
   ]
+
+  # Multi-network IP calculations
+  # Controllers: backbone .10+, internet .10+, tenant-red .10+, tenant-green .10+
+  # Workers: backbone .20+, internet .20+, tenant-red .20+, tenant-green .20+
+  controller_multi_network = var.enable_multi_network ? [
+    for i in range(var.controller_count) : {
+      backbone = {
+        address = cidrhost(var.network_backbone.cidr, var.cluster_node_network_first_controller_hostnum + i)
+        prefix  = split("/", var.network_backbone.cidr)[1]
+        gateway = var.network_backbone.gateway
+      }
+      internet = {
+        address = cidrhost(var.network_internet.cidr, var.cluster_node_network_first_controller_hostnum + i)
+        prefix  = split("/", var.network_internet.cidr)[1]
+        gateway = var.network_internet.gateway
+      }
+      tenant_red = {
+        address = cidrhost(var.network_tenant_red.cidr, var.cluster_node_network_first_controller_hostnum + i)
+        prefix  = split("/", var.network_tenant_red.cidr)[1]
+      }
+      tenant_green = {
+        address = cidrhost(var.network_tenant_green.cidr, var.cluster_node_network_first_controller_hostnum + i)
+        prefix  = split("/", var.network_tenant_green.cidr)[1]
+      }
+    }
+  ] : []
+
+  worker_multi_network = var.enable_multi_network ? [
+    for i in range(var.worker_count) : {
+      backbone = {
+        address = cidrhost(var.network_backbone.cidr, var.cluster_node_network_first_worker_hostnum + i)
+        prefix  = split("/", var.network_backbone.cidr)[1]
+        gateway = var.network_backbone.gateway
+      }
+      internet = {
+        address = cidrhost(var.network_internet.cidr, var.cluster_node_network_first_worker_hostnum + i)
+        prefix  = split("/", var.network_internet.cidr)[1]
+        gateway = var.network_internet.gateway
+      }
+      tenant_red = {
+        address = cidrhost(var.network_tenant_red.cidr, var.cluster_node_network_first_worker_hostnum + i)
+        prefix  = split("/", var.network_tenant_red.cidr)[1]
+      }
+      tenant_green = {
+        address = cidrhost(var.network_tenant_green.cidr, var.cluster_node_network_first_worker_hostnum + i)
+        prefix  = split("/", var.network_tenant_green.cidr)[1]
+      }
+    }
+  ] : []
+
   kube_prism_port = 7445
   common_machine_configs = [
     {
@@ -225,7 +275,42 @@ resource "talos_machine_configuration_apply" "controller" {
       auto       = "off"
       hostname   = local.controller_nodes[count.index].name
     }),
-    yamlencode({
+    # Network configuration - conditional based on multi-network mode
+    var.enable_multi_network ? yamlencode({
+      machine = {
+        network = {
+          interfaces = [
+            # eth0: Backbone - Management, API, etcd (default route)
+            {
+              interface = "eth0"
+              addresses = ["${local.controller_multi_network[count.index].backbone.address}/${local.controller_multi_network[count.index].backbone.prefix}"]
+              routes = [
+                {
+                  network = "0.0.0.0/0"
+                  gateway = local.controller_multi_network[count.index].backbone.gateway
+                }
+              ]
+            },
+            # eth1: Internet - Ingress/egress via Traefik
+            {
+              interface = "eth1"
+              addresses = ["${local.controller_multi_network[count.index].internet.address}/${local.controller_multi_network[count.index].internet.prefix}"]
+            },
+            # eth2: Tenant Red - Isolated workloads
+            {
+              interface = "eth2"
+              addresses = ["${local.controller_multi_network[count.index].tenant_red.address}/${local.controller_multi_network[count.index].tenant_red.prefix}"]
+            },
+            # eth3: Tenant Green - Isolated workloads
+            {
+              interface = "eth3"
+              addresses = ["${local.controller_multi_network[count.index].tenant_green.address}/${local.controller_multi_network[count.index].tenant_green.prefix}"]
+            }
+          ]
+          nameservers = var.cluster_node_network_nameservers
+        }
+      }
+    }) : yamlencode({
       machine = {
         network = {
           interfaces = [
@@ -265,7 +350,42 @@ resource "talos_machine_configuration_apply" "worker" {
       auto       = "off"
       hostname   = local.worker_nodes[count.index].name
     }),
-    yamlencode({
+    # Network configuration - conditional based on multi-network mode
+    var.enable_multi_network ? yamlencode({
+      machine = {
+        network = {
+          interfaces = [
+            # eth0: Backbone - Management, API (default route)
+            {
+              interface = "eth0"
+              addresses = ["${local.worker_multi_network[count.index].backbone.address}/${local.worker_multi_network[count.index].backbone.prefix}"]
+              routes = [
+                {
+                  network = "0.0.0.0/0"
+                  gateway = local.worker_multi_network[count.index].backbone.gateway
+                }
+              ]
+            },
+            # eth1: Internet - Ingress/egress via Traefik
+            {
+              interface = "eth1"
+              addresses = ["${local.worker_multi_network[count.index].internet.address}/${local.worker_multi_network[count.index].internet.prefix}"]
+            },
+            # eth2: Tenant Red - Isolated workloads
+            {
+              interface = "eth2"
+              addresses = ["${local.worker_multi_network[count.index].tenant_red.address}/${local.worker_multi_network[count.index].tenant_red.prefix}"]
+            },
+            # eth3: Tenant Green - Isolated workloads
+            {
+              interface = "eth3"
+              addresses = ["${local.worker_multi_network[count.index].tenant_green.address}/${local.worker_multi_network[count.index].tenant_green.prefix}"]
+            }
+          ]
+          nameservers = var.cluster_node_network_nameservers
+        }
+      }
+    }) : yamlencode({
       machine = {
         network = {
           interfaces = [

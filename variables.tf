@@ -14,7 +14,79 @@ variable "proxmox_storage" {
 
 variable "proxmox_bridge" {
   type    = string
-  default = "vmbr1"
+  default = "vmbr0"
+  description = "VLAN-aware bridge in Proxmox"
+}
+
+# =============================================================================
+# Network Configuration (VLAN-based multi-network setup)
+# =============================================================================
+# All nodes get 4 network interfaces:
+#   eth0 (Backbone)     - Cluster management, API, etcd
+#   eth1 (Internet)     - Ingress/egress traffic via Traefik
+#   eth2 (Tenant Red)   - Isolated tenant workloads
+#   eth3 (Tenant Green) - Isolated tenant workloads
+
+variable "network_backbone" {
+  description = "Backbone network for cluster management"
+  type = object({
+    vlan_id = number
+    cidr    = string
+    gateway = string
+  })
+  default = {
+    vlan_id = 190
+    cidr    = "192.168.190.0/24"
+    gateway = "192.168.190.254"
+  }
+}
+
+variable "network_internet" {
+  description = "Internet-facing network for ingress/egress"
+  type = object({
+    vlan_id = number
+    cidr    = string
+    gateway = string
+  })
+  default = {
+    vlan_id = 100
+    cidr    = "10.0.0.0/24"
+    gateway = "10.0.0.1"
+  }
+}
+
+variable "network_tenant_red" {
+  description = "Isolated tenant network (Red)"
+  type = object({
+    vlan_id = number
+    cidr    = string
+    gateway = string
+  })
+  default = {
+    vlan_id = 101
+    cidr    = "10.1.0.0/24"
+    gateway = ""  # No gateway - isolated
+  }
+}
+
+variable "network_tenant_green" {
+  description = "Isolated tenant network (Green)"
+  type = object({
+    vlan_id = number
+    cidr    = string
+    gateway = string
+  })
+  default = {
+    vlan_id = 102
+    cidr    = "10.2.0.0/24"
+    gateway = ""  # No gateway - isolated
+  }
+}
+
+variable "enable_multi_network" {
+  description = "Enable multi-network VLAN configuration (backbone, internet, tenant-red, tenant-green)"
+  type        = bool
+  default     = false
 }
 
 # see https://github.com/siderolabs/talos/releases

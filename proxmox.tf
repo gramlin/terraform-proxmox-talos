@@ -4,6 +4,12 @@ locals {
   vm_name_prefix              = local.cluster_prefix != "" ? "${local.cluster_prefix}-" : ""
   cluster_tag                 = local.cluster_prefix != "" ? local.cluster_prefix : var.cluster_name
   cluster_node_network_prefix = split("/", var.cluster_node_network)[1]
+
+  # Multi-network VLAN configuration
+  backbone_prefix     = split("/", var.network_backbone.cidr)[1]
+  internet_prefix     = split("/", var.network_internet.cidr)[1]
+  tenant_red_prefix   = split("/", var.network_tenant_red.cidr)[1]
+  tenant_green_prefix = split("/", var.network_tenant_green.cidr)[1]
 }
 
 # Upload the Talos image as a "snippet/iso" file (provider uses it as a disk source)
@@ -43,8 +49,37 @@ resource "proxmox_virtual_environment_vm" "controller" {
 
   vga { type = "qxl" }
 
+  # Network: Backbone (eth0) - Management, API, etcd
   network_device {
-    bridge = var.proxmox_bridge
+    bridge  = var.proxmox_bridge
+    vlan_id = var.enable_multi_network ? var.network_backbone.vlan_id : null
+  }
+
+  # Network: Internet (eth1) - Ingress/egress via Traefik
+  dynamic "network_device" {
+    for_each = var.enable_multi_network ? [1] : []
+    content {
+      bridge  = var.proxmox_bridge
+      vlan_id = var.network_internet.vlan_id
+    }
+  }
+
+  # Network: Tenant Red (eth2) - Isolated workloads
+  dynamic "network_device" {
+    for_each = var.enable_multi_network ? [1] : []
+    content {
+      bridge  = var.proxmox_bridge
+      vlan_id = var.network_tenant_red.vlan_id
+    }
+  }
+
+  # Network: Tenant Green (eth3) - Isolated workloads
+  dynamic "network_device" {
+    for_each = var.enable_multi_network ? [1] : []
+    content {
+      bridge  = var.proxmox_bridge
+      vlan_id = var.network_tenant_green.vlan_id
+    }
   }
 
   tpm_state { version = "v2.0" }
@@ -106,8 +141,37 @@ resource "proxmox_virtual_environment_vm" "worker" {
 
   vga { type = "qxl" }
 
+  # Network: Backbone (eth0) - Management, API
   network_device {
-    bridge = var.proxmox_bridge
+    bridge  = var.proxmox_bridge
+    vlan_id = var.enable_multi_network ? var.network_backbone.vlan_id : null
+  }
+
+  # Network: Internet (eth1) - Ingress/egress via Traefik
+  dynamic "network_device" {
+    for_each = var.enable_multi_network ? [1] : []
+    content {
+      bridge  = var.proxmox_bridge
+      vlan_id = var.network_internet.vlan_id
+    }
+  }
+
+  # Network: Tenant Red (eth2) - Isolated workloads
+  dynamic "network_device" {
+    for_each = var.enable_multi_network ? [1] : []
+    content {
+      bridge  = var.proxmox_bridge
+      vlan_id = var.network_tenant_red.vlan_id
+    }
+  }
+
+  # Network: Tenant Green (eth3) - Isolated workloads
+  dynamic "network_device" {
+    for_each = var.enable_multi_network ? [1] : []
+    content {
+      bridge  = var.proxmox_bridge
+      vlan_id = var.network_tenant_green.vlan_id
+    }
   }
 
   tpm_state { version = "v2.0" }

@@ -350,6 +350,136 @@ Ensure your Proxmox host has a bridge network (usually `vmbr0`) that VMs can use
 cat /etc/network/interfaces | grep -A5 "iface vmbr"
 ```
 
+#### VLAN-aware Bridge Setup (Multi-Network Mode)
+
+For multi-tenant network isolation, configure a VLAN-aware bridge on Proxmox. This setup supports:
+
+- **Backbone (VLAN 190)** - Management network, Kubernetes cluster communication
+- **Internet (VLAN 100)** - External traffic via Traefik ingress
+- **Tenant Red (VLAN 101)** - Isolated tenant network
+- **Tenant Green (VLAN 102)** - Isolated tenant network
+
+**Step 1: Configure VLAN-aware bridge in `/etc/network/interfaces`:**
+
+```bash
+# Example configuration - adjust to your environment
+auto vmbr0
+iface vmbr0 inet manual
+    bridge-ports enp1s0
+    bridge-stp off
+    bridge-fd 0
+    bridge-vlan-aware yes
+    bridge-vids 2-4094
+
+# Management interface (optional, for Proxmox access)
+auto vmbr0.190
+iface vmbr0.190 inet static
+    address 192.168.190.118/24
+    gateway 192.168.190.1
+```
+
+**Step 2: Apply network configuration:**
+
+```bash
+# Test configuration
+ifreload -a
+
+# Or reboot if needed
+systemctl restart networking
+```
+
+**Step 3: Verify VLAN configuration:**
+
+```bash
+# Check bridge VLAN settings
+bridge vlan show dev vmbr0
+
+# Verify trunk port is passing VLANs
+bridge vlan show | grep -E "vmbr0|190|100|101|102"
+```
+
+**Step 4: Configure upstream switch (example for Cisco IOS):**
+
+```
+interface GigabitEthernet0/1
+  description Proxmox Trunk
+  switchport trunk encapsulation dot1q
+  switchport mode trunk
+  switchport trunk allowed vlan 100,101,102,190
+```
+
+**Step 5: Enable multi-network in Terraform:**
+
+Set `enable_multi_network = true` in `terraform.auto.tfvars`:
+
+```hcl
+enable_multi_network = true
+
+network_backbone = {
+  vlan_id = 190
+  cidr    = "192.168.190.0/24"
+  gateway = "192.168.190.1"
+}
+
+network_internet = {
+  vlan_id = 100
+  cidr    = "10.0.0.0/24"
+  gateway = "10.0.0.1"
+}
+
+network_tenant_red = {
+  vlan_id = 101
+  cidr    = "10.1.0.0/24"
+  gateway = ""  # No gateway - isolated
+}
+
+network_tenant_green = {
+  vlan_id = 102
+  cidr    = "10.2.0.0/24"
+  gateway = ""  # No gateway - isolated
+}
+```
+
+#### Network Architecture
+
+```
+                                    ┌─────────────────────────────────────────┐
+                                    │           Upstream Router               │
+                                    │         (Internet Gateway)              │
+                                    └─────────────────┬───────────────────────┘
+                                                      │
+                                    ┌─────────────────┴───────────────────────┐
+                                    │         VLAN-aware Switch               │
+                                    │   Trunk: VLAN 100,101,102,190           │
+                                    └─────────────────┬───────────────────────┘
+                                                      │
+                                    ┌─────────────────┴───────────────────────┐
+                                    │         Proxmox vmbr0                   │
+                                    │       (VLAN-aware bridge)               │
+                                    └─────────────────┬───────────────────────┘
+                                                      │
+              ┌───────────────────────────────────────┼───────────────────────────────────────┐
+              │                                       │                                       │
+    ┌─────────┴─────────┐                   ┌─────────┴─────────┐                   ┌─────────┴─────────┐
+    │   Controller 1    │                   │    Worker 1       │                   │    Worker N       │
+    ├───────────────────┤                   ├───────────────────┤                   ├───────────────────┤
+    │ eth0: Backbone    │                   │ eth0: Backbone    │                   │ eth0: Backbone    │
+    │      VLAN 190     │                   │      VLAN 190     │                   │      VLAN 190     │
+    │ eth1: Internet    │                   │ eth1: Internet    │                   │ eth1: Internet    │
+    │      VLAN 100     │                   │      VLAN 100     │                   │      VLAN 100     │
+    │ eth2: Tenant Red  │                   │ eth2: Tenant Red  │                   │ eth2: Tenant Red  │
+    │      VLAN 101     │                   │      VLAN 101     │                   │      VLAN 101     │
+    │ eth3: Tenant Green│                   │ eth3: Tenant Green│                   │ eth3: Tenant Green│
+    │      VLAN 102     │                   │      VLAN 102     │                   │      VLAN 102     │
+    └───────────────────┘                   └───────────────────┘                   └───────────────────┘
+```
+
+**Traffic Flow:**
+
+- **Backbone (eth0)**: Kubernetes API, etcd, internal cluster traffic
+- **Internet (eth1)**: Traefik ingress → LoadBalancer → external traffic
+- **Tenant Networks (eth2/3)**: Isolated pod networks, no external routing
+
 ### 5. Enable Nested Virtualization (Optional, for better performance)
 
 ```bash
