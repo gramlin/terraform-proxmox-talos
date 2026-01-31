@@ -219,4 +219,12 @@ resource "proxmox_virtual_environment_vm" "worker" {
       }
     }
   }
+
+  # Prevent disk shrink errors - Proxmox can't shrink disks
+  lifecycle {
+    ignore_changes = [
+      disk[0].size,
+      disk[1].size,
+    ]
+  }
 }
