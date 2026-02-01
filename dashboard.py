@@ -348,21 +348,23 @@ class ClusterDashboard:
                 state = json.load(f)
                 resources = state.get("resources", [])
                 
+                vm_resources = [r for r in resources if "proxmox_virtual_environment_vm" in r.get("type", "")]
+
                 # Check for controller VMs (match "controller" or "cp" in name)
-                ctrl_vms = [r for r in resources if "proxmox" in r.get("type", "") and 
-                           ("controller" in r.get("name", "") or "cp" in r.get("name", "").lower())]
-                if ctrl_vms:
+                ctrl_resources = [r for r in vm_resources if "controller" in r.get("name", "").lower() or "cp" in r.get("name", "").lower()]
+                ctrl_count = sum(len(r.get("instances", [])) for r in ctrl_resources)
+                if ctrl_count > 0:
                     checkpoints[1].status = Status.SUCCESS
-                    checkpoints[1].message = str(len(ctrl_vms))
+                    checkpoints[1].message = str(ctrl_count)
                 
                 # Check for worker VMs (match "worker" or "wk" in name)
-                worker_vms = [r for r in resources if "proxmox" in r.get("type", "") and 
-                             ("worker" in r.get("name", "") or "wk" in r.get("name", "").lower())]
-                if worker_vms:
+                worker_resources = [r for r in vm_resources if "worker" in r.get("name", "").lower() or "wk" in r.get("name", "").lower()]
+                worker_count = sum(len(r.get("instances", [])) for r in worker_resources)
+                if worker_count > 0:
                     checkpoints[2].status = Status.SUCCESS
-                    checkpoints[2].message = str(len(worker_vms))
+                    checkpoints[2].message = str(worker_count)
                 
-                total_vms = len(ctrl_vms) + len(worker_vms)
+                total_vms = ctrl_count + worker_count
                 if total_vms >= 6:
                     return Status.SUCCESS, f"{total_vms} VMs"
                 elif total_vms > 0:
@@ -1025,7 +1027,7 @@ class ClusterDashboard:
                 elif "cainjector" in name:
                     checkpoints[2].status = Status.SUCCESS if ready else Status.WAITING
             
-            # Check ClusterIssuer
+            # Check ClusterIssuer (optional - don't block on it)
             issuer_success, issuer_output = self._kubectl(["get", "clusterissuer", "-o", "json"])
             if issuer_success:
                 try:
@@ -1040,11 +1042,15 @@ class ClusterDashboard:
                 except:
                     pass
             
-            done = sum(1 for cp in checkpoints if cp.status == Status.SUCCESS)
-            total = len(checkpoints)
-            if done == total:
-                return Status.SUCCESS, f"{done}/{total}"
-            return Status.WAITING, f"{done}/{total}"
+            # Count only core pods (first 3 checkpoints) for status
+            core_done = sum(1 for cp in checkpoints[:3] if cp.status == Status.SUCCESS)
+            issuer_done = 1 if checkpoints[3].status == Status.SUCCESS else 0
+            
+            if core_done == 3:
+                if issuer_done:
+                    return Status.SUCCESS, f"4/4"
+                return Status.SUCCESS, f"3/3 pods"
+            return Status.WAITING, f"{core_done}/3"
         except:
             return Status.FAILED, "Error"
 
