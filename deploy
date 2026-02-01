@@ -35,9 +35,23 @@ if ! .venv/bin/python -c "import rich" 2>/dev/null; then
     .venv/bin/python -m pip install -q rich
 fi
 
-# Parse arguments
-DO_CMD="${1:-apply}"
-shift || true
+# Parse arguments - handle -b flag for deploy script itself
+BLINKENLICHT=""
+DO_CMD="apply"
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -b|--blinkenlicht)
+            BLINKENLICHT="-b"
+            shift
+            ;;
+        *)
+            DO_CMD="$1"
+            shift
+            break
+            ;;
+    esac
+done
 
 cleanup() {
     info "Cleaning up..."
@@ -72,7 +86,7 @@ if command -v tmux >/dev/null && [[ -z "${TMUX:-}" ]]; then
                 "cd '$SCRIPT_DIR' && ./do $DO_CMD $*; echo ''; echo 'Press Enter to close...'; read"
             # Split for dashboard (67% width on the right)
             tmux split-window -h -t deploy:main \
-                "cd '$SCRIPT_DIR' && .venv/bin/python dashboard.py -b"
+                "cd '$SCRIPT_DIR' && .venv/bin/python dashboard.py $BLINKENLICHT"
             # Resize left pane (logs) to 33%, dashboard gets 67%
             tmux resize-pane -t deploy:main.0 -x 33%
             # Set background color for both panes (#D9D7B6)
@@ -86,7 +100,7 @@ if command -v tmux >/dev/null && [[ -z "${TMUX:-}" ]]; then
             info "Starting dashboard..."
             echo "Run './do $DO_CMD' in another terminal"
             echo ""
-            exec .venv/bin/python dashboard.py -b
+            exec .venv/bin/python dashboard.py $BLINKENLICHT
             ;;
         3)
             exec ./do "$DO_CMD" "$@"
@@ -99,7 +113,7 @@ elif [[ -n "${TMUX:-}" ]]; then
     # Already in tmux - split the pane
     info "Splitting tmux pane for dashboard..."
     tmux split-window -h -t "$TMUX_PANE" \
-        "cd '$SCRIPT_DIR' && .venv/bin/python dashboard.py -b"
+        "cd '$SCRIPT_DIR' && .venv/bin/python dashboard.py $BLINKENLICHT"
     exec ./do "$DO_CMD" "$@"
 else
     # No tmux available - run in background with simple output

@@ -1218,79 +1218,13 @@ class ClusterDashboard:
         return table
 
     def render_blinkenlights(self) -> Text:
-        """DAS BLINKENLICHTEN! Render animated status LEDs with MAXIMUM BELLS AND WHISTLES"""
+        """Render full-width status panel with detailed metrics"""
         text = Text()
         all_done = all(s.status == Status.SUCCESS for s in self.steps)
-        
-        # Header with animated border
-        border_char = "═" if self.frame % 4 < 2 else "─"
-        text.append(f"╔{border_char*43}╗\n", style="#444444")
-        text.append("║", style="#444444")
-        
-        # Animated title
-        if all_done:
-            title = "  ALL SYSTEMS NOMINAL! MISSION SUCCESS!  "
-            for i, char in enumerate(title):
-                colors = ["#00FF00", "#00DD00", "#00BB00", "#00FF00"]
-                color = colors[(self.frame + i) % len(colors)]
-                text.append(char, style=f"bold {color}")
-        else:
-            title = "  SYSTEM STATUS MONITOR  "
-            for i, char in enumerate(title):
-                phase = (self.frame + i * 2) % 20
-                if phase < 10:
-                    text.append(char, style="bold #000000")
-                else:
-                    text.append(char, style="bold #333333")
-        
-        text.append("║\n", style="#444444")
-        text.append("╠═══════════════════════════════════════════╣\n", style="#444444")
-        
-        # Scrolling status message
-        text.append("║ ", style="#444444")
-        active_step = next((s for s in self.steps if s.status == Status.WAITING), None)
-        if all_done:
-            message = "★ CLUSTER READY ★ ALL COMPONENTS DEPLOYED ★ TESTS COMPLETE ★ "
-        elif active_step:
-            message = f">>> {active_step.name.upper()}: {active_step.message or 'Processing...'} <<< "
-        else:
-            message = ">>> INITIALIZING CLUSTER DEPLOYMENT <<< "
-        
-        # Scroll the message
-        display_width = 39
-        scroll_offset = self.frame % len(message)
-        scrolled = (message * 3)[scroll_offset:scroll_offset + display_width]
-        text.append(scrolled, style="#00AAFF bold")
-        text.append("  ║\n", style="#444444")
-        
-        text.append("╠═══════════════════════════════════════════╣\n", style="#444444")
-        
-        # Helper to render LED row
-        def render_led_row(label: str, steps_slice: list, width: int = 8):
-            text.append("║ ", style="#444444")
-            text.append(f"{label:4} ", style="#000000 dim")
-            
-            for i in range(width):
-                if i < len(steps_slice):
-                    step = steps_slice[i]
-                    if step.status == Status.SUCCESS:
-                        text.append("●", style="#33FF33")
-                    elif step.status == Status.WAITING:
-                        on = (self.frame + i) % 4 < 2
-                        text.append("●" if on else "○", style="#FFAA33" if on else LED_DIM)
-                    elif step.status == Status.FAILED:
-                        on = self.frame % 2 == 0
-                        text.append("●" if on else "○", style="#FF3333" if on else "#880000")
-                    else:
-                        text.append("○", style=LED_DIM)
-                else:
-                    text.append("·", style=LED_DIM)
-                text.append(" ", style="#444444")
-            
-            # Show count
-            done = sum(1 for s in steps_slice if s.status == Status.SUCCESS)
-            text.append(f" {done}/{len(steps_slice)}", style="#666666")
-            text.append(" ║\n", style="#444444")
+        completed = sum(1 for s in self.steps if s.status == Status.SUCCESS)
+        waiting = sum(1 for s in self.steps if s.status == Status.WAITING)
+        failed = sum(1 for s in self.steps if s.status == Status.FAILED)
+        total = len(self.steps)
         
         # Group steps by category
         infra_steps = [s for s in self.steps if s.name in ["tfplan", "tfapply", "vms"]]
@@ -1299,86 +1233,167 @@ class ClusterDashboard:
         stor_steps = [s for s in self.steps if s.name in ["piraeus", "linstor", "satellites", "storage", "sc"]]
         apps_steps = [s for s in self.steps if s.name in ["traefik", "certmgr", "monitoring", "harbor", "gitea", "ingress"]]
         
-        # INFRA: TF Plan, TF Apply, VMs
-        render_led_row("INFR", infra_steps, 3)
+        # Calculate category stats
+        def cat_stats(steps):
+            done = sum(1 for s in steps if s.status == Status.SUCCESS)
+            wait = sum(1 for s in steps if s.status == Status.WAITING)
+            fail = sum(1 for s in steps if s.status == Status.FAILED)
+            return done, wait, fail, len(steps)
         
-        # TALOS: Talos Cfg, Talos Boot, Nodes
-        render_led_row("TALO", talos_steps, 3)
+        # Header
+        border = "═" * 98
+        text.append(f"╔{border}╗\n", style="#444444")
         
-        # NET: Cilium
-        render_led_row("NET ", net_steps, 1)
-        
-        # STOR: Piraeus, LINSTOR, Satellites, Storage, StorClass
-        render_led_row("STOR", stor_steps, 5)
-        
-        # APPS: Traefik, CertMgr, Monitor, Harbor, Gitea, Ingress
-        render_led_row("APPS", apps_steps, 6)
-        
-        # Progress bar
+        # Title row with stats
         text.append("║ ", style="#444444")
-        text.append("PROG ", style="#000000 dim")
+        title = "SYSTEM STATUS MONITOR"
+        if all_done:
+            for i, char in enumerate(title):
+                colors = ["#00FF00", "#00DD00", "#00BB00", "#00FF00"]
+                text.append(char, style=f"bold {colors[(self.frame + i) % len(colors)]}")
+        else:
+            text.append(title, style="bold #000000")
         
-        completed = sum(1 for s in self.steps if s.status == Status.SUCCESS)
-        total = len(self.steps)
-        fill = int((completed / total) * 8) if total > 0 else 0
+        text.append("  │  ", style="#444444")
+        text.append(f"Progress: ", style="#666666")
+        text.append(f"{completed}/{total}", style="bold #000000")
+        text.append(f" ({int(completed/total*100)}%)", style="#666666")
         
-        for i in range(8):
+        if waiting > 0:
+            spinner = SPINNER_FRAMES[self.frame % len(SPINNER_FRAMES)]
+            text.append(f"  │  {spinner} ", style="#FFAA33")
+            text.append(f"{waiting} active", style="#FFAA33")
+        if failed > 0:
+            text.append(f"  │  ✗ ", style="#FF3333")
+            text.append(f"{failed} failed", style="#FF3333")
+        
+        # Pad to fill width
+        text.append(" " * 20 + "║\n", style="#444444")
+        
+        text.append(f"╠{border}╣\n", style="#444444")
+        
+        # Scrolling status message
+        text.append("║ ", style="#444444")
+        active_step = next((s for s in self.steps if s.status == Status.WAITING), None)
+        if all_done:
+            message = "★ CLUSTER READY ★ ALL COMPONENTS DEPLOYED ★ "
+        elif active_step:
+            message = f">>> {active_step.name.upper()}: {active_step.message or 'Processing...'} <<< "
+        else:
+            message = ">>> INITIALIZING <<< "
+        
+        scroll_offset = self.frame % len(message)
+        scrolled = (message * 5)[scroll_offset:scroll_offset + 96]
+        text.append(scrolled, style="#00AAFF bold")
+        text.append(" ║\n", style="#444444")
+        
+        text.append(f"╠{border}╣\n", style="#444444")
+        
+        # Category rows with detailed info
+        def render_category_row(label: str, steps_list: list, icon: str):
+            done, wait, fail, tot = cat_stats(steps_list)
+            text.append("║ ", style="#444444")
+            text.append(f"{icon} ", style="#666666")
+            text.append(f"{label:12}", style="bold #000000")
+            text.append(" │ ", style="#444444")
+            
+            # LED indicators for each step
+            for i, step in enumerate(steps_list):
+                if step.status == Status.SUCCESS:
+                    text.append("●", style="#33FF33")
+                elif step.status == Status.WAITING:
+                    on = (self.frame + i) % 4 < 2
+                    text.append("●" if on else "○", style="#FFAA33" if on else LED_DIM)
+                elif step.status == Status.FAILED:
+                    on = self.frame % 2 == 0
+                    text.append("●" if on else "○", style="#FF3333" if on else "#880000")
+                else:
+                    text.append("○", style=LED_DIM)
+                text.append(" ", style="#444444")
+            
+            # Pad LEDs
+            for _ in range(8 - len(steps_list)):
+                text.append("  ", style="#444444")
+            
+            text.append("│ ", style="#444444")
+            
+            # Step names with status
+            for step in steps_list[:4]:  # Show up to 4 step names
+                if step.status == Status.SUCCESS:
+                    text.append(f"{step.label[:8]:8} ", style="#008800")
+                elif step.status == Status.WAITING:
+                    text.append(f"{step.label[:8]:8} ", style="#AA6600")
+                elif step.status == Status.FAILED:
+                    text.append(f"{step.label[:8]:8} ", style="#CC0000")
+                else:
+                    text.append(f"{step.label[:8]:8} ", style="#666666")
+            
+            # Pad names
+            for _ in range(4 - min(4, len(steps_list))):
+                text.append(" " * 9, style="#444444")
+            
+            text.append("│ ", style="#444444")
+            
+            # Summary
+            if done == tot:
+                text.append("✓ DONE ", style="#33FF33 bold")
+            elif fail > 0:
+                text.append("✗ FAIL ", style="#FF3333 bold")
+            elif wait > 0:
+                spinner = DOTS_FRAMES[self.frame % len(DOTS_FRAMES)]
+                text.append(f"{spinner} RUN  ", style="#FFAA33 bold")
+            else:
+                text.append("○ WAIT ", style="#666666")
+            
+            text.append(f"{done}/{tot}", style="#000000")
+            text.append(" " * 5 + "║\n", style="#444444")
+        
+        render_category_row("INFRA", infra_steps, "🏗")
+        render_category_row("TALOS", talos_steps, "🖥")
+        render_category_row("NETWORK", net_steps, "🌐")
+        render_category_row("STORAGE", stor_steps, "💾")
+        render_category_row("APPS", apps_steps, "📦")
+        
+        text.append(f"╠{border}╣\n", style="#444444")
+        
+        # Progress bar row (full width)
+        text.append("║ ", style="#444444")
+        text.append("PROGRESS ", style="bold #000000")
+        
+        bar_width = 60
+        fill = int((completed / total) * bar_width) if total > 0 else 0
+        
+        text.append("│", style="#444444")
+        for i in range(bar_width):
             if i < fill:
-                text.append("█", style="#33FF33")
+                # Color gradient based on position
+                if i < bar_width * 0.33:
+                    text.append("█", style="#FF6633")
+                elif i < bar_width * 0.66:
+                    text.append("█", style="#FFAA33")
+                else:
+                    text.append("█", style="#33FF33")
             elif i == fill and self.frame % 4 < 2:
                 text.append("▓", style="#FFAA33")
             else:
                 text.append("░", style=LED_DIM)
-            text.append(" ", style="#444444")
+        text.append("│", style="#444444")
         
         pct = int((completed / total) * 100) if total > 0 else 0
-        text.append(f" {pct:3d}%", style="#000000 bold")
-        text.append(" ║\n", style="#444444")
+        text.append(f" {pct:3d}% ", style="bold #000000")
         
-        text.append("╠═══════════════════════════════════════════╣\n", style="#444444")
-        
-        # Activity indicators with animations
-        text.append("║ ", style="#444444")
-        
-        # Kubernetes
-        k8s_ok = any(s.status == Status.SUCCESS for s in self.steps if "node" in s.name.lower())
-        k8s_icon = "☸" if k8s_ok else DOTS_FRAMES[self.frame % len(DOTS_FRAMES)]
-        text.append(f" {k8s_icon} ", style="#326CE5" if k8s_ok else "#FFAA33")
-        
-        # Network
-        net_ok = any(s.status == Status.SUCCESS for s in self.steps if "cilium" in s.name.lower())
-        net_icon = NETWORK_FRAMES[self.frame % len(NETWORK_FRAMES)]
-        text.append(f" {net_icon} ", style="#33FF33" if net_ok else "#FFAA33")
-        
-        # Storage
-        stor_ok = any(s.status == Status.SUCCESS for s in self.steps if "storage" in s.name.lower())
-        disk_icon = DISK_FRAMES[self.frame % len(DISK_FRAMES)]
-        text.append(f" {disk_icon} ", style="#33FF33" if stor_ok else "#FFAA33")
-        
-        # Server
-        srv_icon = SERVER_FRAMES[self.frame % len(SERVER_FRAMES)]
-        text.append(f" {srv_icon} ", style="#33FF33")
-        
-        # Earth (connectivity)
-        earth_icon = EARTH_FRAMES[self.frame % len(EARTH_FRAMES)]
-        text.append(f" {earth_icon} ", style="#33FF33")
-        
-        # Rocket (progress)
-        if completed < total:
-            rocket_icon = ROCKET_FRAMES[self.frame % len(ROCKET_FRAMES)]
-            text.append(f" {rocket_icon}", style="#FF6633")
-        else:
-            text.append(" ✅", style="#33FF33")
-        
-        text.append("    ║\n", style="#444444")
+        # Elapsed time
+        elapsed = int(time.time() - self.start_time)
+        mins, secs = divmod(elapsed, 60)
+        text.append(f"│ ⏱ {mins:02d}:{secs:02d} ", style="#666666")
+        text.append("║\n", style="#444444")
         
         # Wave animation bar
         text.append("║ ", style="#444444")
-        wave_width = 41
+        wave_width = 96
         for i in range(wave_width):
             wave_char = WAVE_FRAMES[(self.frame + i) % len(WAVE_FRAMES)]
-            # Color gradient
-            hue = (self.frame * 5 + i * 8) % 360
+            hue = (self.frame * 3 + i * 4) % 360
             if hue < 60:
                 color = "#FF3333"
             elif hue < 120:
@@ -1394,7 +1409,7 @@ class ClusterDashboard:
             text.append(wave_char, style=color)
         text.append(" ║\n", style="#444444")
         
-        text.append("╚═══════════════════════════════════════════╝", style="#444444")
+        text.append(f"╚{border}╝", style="#444444")
         
         return text
 
