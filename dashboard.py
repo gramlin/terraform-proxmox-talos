@@ -1289,38 +1289,37 @@ class ClusterDashboard:
         
         text.append(f"╠{border}╣\n", style="#444444")
         
-        # Category rows with detailed info - fixed width columns
-        def render_category_row(label: str, steps_list: list, icon: str):
+        # Category rows with detailed info - fixed width columns, NO EMOJIS
+        def render_category_row(label: str, steps_list: list):
             done, wait, fail, tot = cat_stats(steps_list)
             text.append("║ ", style="#444444")
-            text.append(f"{icon} ", style="#666666")
             text.append(f"{label:8}", style="bold #000000")
-            text.append("│", style="#444444")
+            text.append(" │", style="#444444")
             
             # LED indicators for each step (fixed 6 slots)
             for i in range(6):
                 if i < len(steps_list):
                     step = steps_list[i]
                     if step.status == Status.SUCCESS:
-                        text.append(" ●", style="#33FF33")
+                        text.append(" *", style="#33FF33")
                     elif step.status == Status.WAITING:
                         on = (self.frame + i) % 4 < 2
-                        text.append(" ●" if on else " ○", style="#FFAA33" if on else LED_DIM)
+                        text.append(" *" if on else " o", style="#FFAA33" if on else LED_DIM)
                     elif step.status == Status.FAILED:
                         on = self.frame % 2 == 0
-                        text.append(" ●" if on else " ○", style="#FF3333" if on else "#880000")
+                        text.append(" X" if on else " x", style="#FF3333" if on else "#880000")
                     else:
-                        text.append(" ○", style=LED_DIM)
+                        text.append(" o", style=LED_DIM)
                 else:
                     text.append("  ", style="#444444")
             
             text.append(" │", style="#444444")
             
-            # Step names with status (fixed 5 slots, 9 chars each)
+            # Step names with status (fixed 5 slots, 10 chars each)
             for i in range(5):
                 if i < len(steps_list):
                     step = steps_list[i]
-                    name = step.description[:9].ljust(9)
+                    name = step.description[:10].ljust(10)
                     if step.status == Status.SUCCESS:
                         text.append(f" {name}", style="#008800")
                     elif step.status == Status.WAITING:
@@ -1330,29 +1329,29 @@ class ClusterDashboard:
                     else:
                         text.append(f" {name}", style="#666666")
                 else:
-                    text.append(" " * 10, style="#444444")
+                    text.append(" " * 11, style="#444444")
             
             text.append(" │", style="#444444")
             
-            # Summary (fixed width)
+            # Summary (fixed width 12 chars)
             if done == tot:
-                text.append(" ✓ DONE", style="#33FF33 bold")
+                text.append(" [DONE]  ", style="#33FF33 bold")
             elif fail > 0:
-                text.append(" ✗ FAIL", style="#FF3333 bold")
+                text.append(" [FAIL]  ", style="#FF3333 bold")
             elif wait > 0:
-                spinner = DOTS_FRAMES[self.frame % len(DOTS_FRAMES)]
-                text.append(f" {spinner} RUN ", style="#FFAA33 bold")
+                spinner = SPINNER_FRAMES[self.frame % len(SPINNER_FRAMES)]
+                text.append(f" {spinner} RUN   ", style="#FFAA33 bold")
             else:
-                text.append(" ○ WAIT", style="#666666")
+                text.append(" [WAIT]  ", style="#666666")
             
-            text.append(f" {done}/{tot}".ljust(6), style="#000000")
-            text.append("║\n", style="#444444")
+            text.append(f"{done}/{tot}".rjust(4), style="#000000")
+            text.append(" ║\n", style="#444444")
         
-        render_category_row("INFRA", infra_steps, "🏗")
-        render_category_row("TALOS", talos_steps, "🖥")
-        render_category_row("NETWORK", net_steps, "🌐")
-        render_category_row("STORAGE", stor_steps, "💾")
-        render_category_row("APPS", apps_steps, "📦")
+        render_category_row("INFRA", infra_steps)
+        render_category_row("TALOS", talos_steps)
+        render_category_row("NETWORK", net_steps)
+        render_category_row("STORAGE", stor_steps)
+        render_category_row("APPS", apps_steps)
         
         text.append(f"╠{border}╣\n", style="#444444")
         
@@ -1361,8 +1360,7 @@ class ClusterDashboard:
         text.append("PROGRESS ", style="bold #000000")
         
         bar_width = 60
-        fill = int((completed / total) * bar_width) if total > 0 else 0
-        
+        fill = int((completed / total) * bar_width) if total > 0 else 0        
         text.append("│", style="#444444")
         for i in range(bar_width):
             if i < fill:
@@ -1478,6 +1476,183 @@ class ClusterDashboard:
                 text.append(char)
         
         return text
+
+    def _load_tf_resources(self) -> dict:
+        """Load terraform resources from JSON file"""
+        tf_file = os.path.join(self.workdir, ".tf-resources.json")
+        if os.path.exists(tf_file):
+            try:
+                with open(tf_file, "r") as f:
+                    return json.load(f)
+            except (json.JSONDecodeError, IOError):
+                pass
+        return {"resources": [], "status": "idle"}
+
+    def render_tf_resources(self) -> Table:
+        """Render terraform resource activity"""
+        data = self._load_tf_resources()
+        resources = data.get("resources", [])
+        status = data.get("status", "idle")
+        
+        table = Table(title="Terraform", show_header=True, border_style="#444444", box=None, title_style="#000000", expand=True)
+        table.add_column("Resource", width=25, style="#000000")
+        table.add_column("Action", width=10)
+        table.add_column("Time", width=8, style="#666666")
+        
+        if status == "idle" or not resources:
+            table.add_row(
+                Text("Waiting for terraform...", style="#666666"),
+                Text("", style="#666666"),
+                Text("", style="#666666")
+            )
+            return table
+        
+        # Show most recent resources (up to 8)
+        recent = sorted(resources, key=lambda r: r.get("updated", ""), reverse=True)[:8]
+        
+        for res in recent:
+            name = res.get("name", "?")[:25]
+            action = res.get("action", "?")
+            message = res.get("message", "")
+            
+            # Color based on action
+            if action == "complete":
+                action_text = Text("[done]", style="#33FF33")
+            elif action == "creating":
+                spinner = SPINNER_FRAMES[self.frame % len(SPINNER_FRAMES)]
+                action_text = Text(f"{spinner} create", style="#FFAA33")
+            elif action == "modifying":
+                spinner = SPINNER_FRAMES[self.frame % len(SPINNER_FRAMES)]
+                action_text = Text(f"{spinner} modify", style="#0088FF")
+            elif action == "destroying":
+                spinner = SPINNER_FRAMES[self.frame % len(SPINNER_FRAMES)]
+                action_text = Text(f"{spinner} delete", style="#FF6633")
+            elif action == "failed":
+                action_text = Text("[FAIL]", style="#FF3333 bold")
+            else:
+                action_text = Text(action[:10], style="#666666")
+            
+            table.add_row(
+                Text(name, style="#000000"),
+                action_text,
+                Text(message, style="#666666")
+            )
+        
+        # Show count if more
+        if len(resources) > 8:
+            table.add_row(
+                Text(f"... +{len(resources) - 8} more", style="#666666"),
+                Text("", style="#666666"),
+                Text("", style="#666666")
+            )
+        
+        return table
+
+    def _load_talos_status(self) -> dict:
+        """Load talos status from JSON file"""
+        talos_file = os.path.join(self.workdir, ".talos-status.json")
+        if os.path.exists(talos_file):
+            try:
+                with open(talos_file, "r") as f:
+                    return json.load(f)
+            except (json.JSONDecodeError, IOError):
+                pass
+        return {"operations": [], "status": "idle"}
+
+    def _load_linstor_status(self) -> dict:
+        """Load linstor status from JSON file"""
+        linstor_file = os.path.join(self.workdir, ".linstor-status.json")
+        if os.path.exists(linstor_file):
+            try:
+                with open(linstor_file, "r") as f:
+                    return json.load(f)
+            except (json.JSONDecodeError, IOError):
+                pass
+        return {"operations": [], "status": "idle"}
+
+    def render_talos_status(self) -> Table:
+        """Render Talos operations status"""
+        data = self._load_talos_status()
+        operations = data.get("operations", [])
+        
+        table = Table(title="Talos", show_header=True, border_style="#444444", box=None, title_style="#000000", expand=True)
+        table.add_column("Operation", width=15, style="#000000")
+        table.add_column("Status", width=10)
+        table.add_column("Info", width=12, style="#666666")
+        
+        if not operations:
+            table.add_row(
+                Text("Waiting...", style="#666666"),
+                Text("", style="#666666"),
+                Text("", style="#666666")
+            )
+            return table
+        
+        for op in operations[-6:]:  # Show last 6
+            name = op.get("name", "?")[:15]
+            action = op.get("action", "?")
+            message = op.get("message", "")[:12]
+            node = op.get("node", "")
+            
+            if action == "complete":
+                action_text = Text("[done]", style="#33FF33")
+            elif action in ["checking", "bootstrapping", "configuring"]:
+                spinner = SPINNER_FRAMES[self.frame % len(SPINNER_FRAMES)]
+                action_text = Text(f"{spinner} {action[:6]}", style="#FFAA33")
+            elif action == "failed":
+                action_text = Text("[FAIL]", style="#FF3333 bold")
+            else:
+                action_text = Text(action[:10], style="#666666")
+            
+            info = message or node
+            table.add_row(
+                Text(name, style="#000000"),
+                action_text,
+                Text(info[:12], style="#666666")
+            )
+        
+        return table
+
+    def render_linstor_status(self) -> Table:
+        """Render LINSTOR operations status"""
+        data = self._load_linstor_status()
+        operations = data.get("operations", [])
+        
+        table = Table(title="LINSTOR", show_header=True, border_style="#444444", box=None, title_style="#000000", expand=True)
+        table.add_column("Component", width=18, style="#000000")
+        table.add_column("Status", width=10)
+        table.add_column("Info", width=10, style="#666666")
+        
+        if not operations:
+            table.add_row(
+                Text("Waiting...", style="#666666"),
+                Text("", style="#666666"),
+                Text("", style="#666666")
+            )
+            return table
+        
+        for op in operations[-6:]:  # Show last 6
+            name = op.get("name", "?")[:18]
+            action = op.get("action", "?")
+            message = op.get("message", "")[:10]
+            
+            if action == "complete":
+                action_text = Text("[done]", style="#33FF33")
+            elif action in ["installing", "creating", "waiting", "running"]:
+                spinner = SPINNER_FRAMES[self.frame % len(SPINNER_FRAMES)]
+                action_text = Text(f"{spinner} {action[:6]}", style="#FFAA33")
+            elif action == "failed":
+                action_text = Text("[FAIL]", style="#FF3333 bold")
+            else:
+                action_text = Text(action[:10], style="#666666")
+            
+            table.add_row(
+                Text(name, style="#000000"),
+                action_text,
+                Text(message, style="#666666")
+            )
+        
+        return table
 
     def render_test_cards(self) -> Table:
         """Render test results as cards with BLINKENLIGHTS"""
@@ -1692,20 +1867,26 @@ class ClusterDashboard:
                     Layout(name="footer", size=3)
                 )
         
-        # Main area: steps on left, tests + pvcs on right
-        layout["main"].split_row(Layout(name="left", ratio=2), Layout(name="right", ratio=3))
+        # Main area: steps on left, operations in middle, tests on right
+        layout["main"].split_row(Layout(name="left", ratio=2), Layout(name="middle", ratio=2), Layout(name="right", ratio=2))
         layout["left"].split_column(Layout(name="steps", ratio=4), Layout(name="details", ratio=1))
-        layout["right"].split_column(Layout(name="tests", ratio=4), Layout(name="pvcs", ratio=1))
+        layout["middle"].split_column(Layout(name="terraform"), Layout(name="talos"), Layout(name="linstor"))
+        layout["right"].split_column(Layout(name="tests", ratio=3), Layout(name="pvcs", ratio=2))
         
         # Header with fancy animation
         layout["header"].update(Panel(self.render_header_fancy(), border_style="#444444", style=BG_STYLE))
         
         # Steps panel
-        layout["steps"].update(Panel(self.render_step_table(), title="📋 Steps", border_style="#444444", style=BG_STYLE))
-        layout["details"].update(Panel(self.render_checkpoint_details(), title="⚡ Active", border_style="#444444", style=BG_STYLE))
+        layout["steps"].update(Panel(self.render_step_table(), title="Steps", border_style="#444444", style=BG_STYLE))
+        layout["details"].update(Panel(self.render_checkpoint_details(), title="Active", border_style="#444444", style=BG_STYLE))
+        
+        # Operation panels: Terraform, Talos, LINSTOR
+        layout["terraform"].update(Panel(self.render_tf_resources(), border_style="#444444", style=BG_STYLE))
+        layout["talos"].update(Panel(self.render_talos_status(), border_style="#444444", style=BG_STYLE))
+        layout["linstor"].update(Panel(self.render_linstor_status(), border_style="#444444", style=BG_STYLE))
         
         # Tests and PVCs
-        layout["tests"].update(Panel(self.render_test_cards(), border_style="#444444", style=BG_STYLE))
+        layout["tests"].update(Panel(self.render_test_cards(), title="Tests", border_style="#444444", style=BG_STYLE))
         layout["pvcs"].update(Panel(self.render_pvc_table(), border_style="#444444", style=BG_STYLE))
         
         # BLINKENLIGHTS! (only if enabled)

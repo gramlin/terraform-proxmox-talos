@@ -598,6 +598,130 @@ terraform_plan() {
   info "Plan written to: $PLANFILE"
 }
 
+# Terraform resource status file for dashboard
+TF_RESOURCES_FILE="$WORKDIR/.tf-resources.json"
+TALOS_STATUS_FILE="$WORKDIR/.talos-status.json"
+LINSTOR_STATUS_FILE="$WORKDIR/.linstor-status.json"
+
+# Initialize terraform resources tracking
+init_tf_resources() {
+  echo '{"resources":[],"status":"idle","timestamp":"'$(date -Iseconds)'"}' > "$TF_RESOURCES_FILE"
+}
+
+# Initialize talos status tracking
+init_talos_status() {
+  echo '{"operations":[],"status":"idle","timestamp":"'$(date -Iseconds)'"}' > "$TALOS_STATUS_FILE"
+}
+
+# Update talos operation status
+update_talos_status() {
+  local name="$1"
+  local action="$2"  # checking, bootstrapping, configuring, complete, failed
+  local message="${3:-}"
+  local node="${4:-}"
+  
+  if command -v jq &>/dev/null; then
+    local current
+    current=$(cat "$TALOS_STATUS_FILE" 2>/dev/null || echo '{"operations":[]}')
+    echo "$current" | jq --arg n "$name" --arg a "$action" --arg m "$message" --arg node "$node" --arg t "$(date -Iseconds)" '
+      .timestamp = $t |
+      .status = "running" |
+      (.operations |= map(if .name == $n then .action = $a | .message = $m | .node = $node | .updated = $t else . end)) |
+      if (.operations | map(select(.name == $n)) | length) == 0 then
+        .operations += [{"name": $n, "action": $a, "message": $m, "node": $node, "updated": $t}]
+      else . end
+    ' > "$TALOS_STATUS_FILE.tmp" && mv "$TALOS_STATUS_FILE.tmp" "$TALOS_STATUS_FILE"
+  fi
+}
+
+# Initialize linstor status tracking
+init_linstor_status() {
+  echo '{"operations":[],"status":"idle","timestamp":"'$(date -Iseconds)'"}' > "$LINSTOR_STATUS_FILE"
+}
+
+# Update linstor operation status
+update_linstor_status() {
+  local name="$1"
+  local action="$2"  # creating, waiting, configuring, complete, failed
+  local message="${3:-}"
+  
+  if command -v jq &>/dev/null; then
+    local current
+    current=$(cat "$LINSTOR_STATUS_FILE" 2>/dev/null || echo '{"operations":[]}')
+    echo "$current" | jq --arg n "$name" --arg a "$action" --arg m "$message" --arg t "$(date -Iseconds)" '
+      .timestamp = $t |
+      .status = "running" |
+      (.operations |= map(if .name == $n then .action = $a | .message = $m | .updated = $t else . end)) |
+      if (.operations | map(select(.name == $n)) | length) == 0 then
+        .operations += [{"name": $n, "action": $a, "message": $m, "updated": $t}]
+      else . end
+    ' > "$LINSTOR_STATUS_FILE.tmp" && mv "$LINSTOR_STATUS_FILE.tmp" "$LINSTOR_STATUS_FILE"
+  fi
+}
+
+# Update a terraform resource status
+update_tf_resource() {
+  local name="$1"
+  local action="$2"  # creating, modifying, destroying, complete, failed
+  local message="${3:-}"
+  
+  # Read current file
+  local current
+  current=$(cat "$TF_RESOURCES_FILE" 2>/dev/null || echo '{"resources":[]}')
+  
+  # Use jq if available, otherwise simple append
+  if command -v jq &>/dev/null; then
+    echo "$current" | jq --arg n "$name" --arg a "$action" --arg m "$message" --arg t "$(date -Iseconds)" '
+      .timestamp = $t |
+      .status = "running" |
+      (.resources |= map(if .name == $n then .action = $a | .message = $m | .updated = $t else . end)) |
+      if (.resources | map(select(.name == $n)) | length) == 0 then
+        .resources += [{"name": $n, "action": $a, "message": $m, "updated": $t}]
+      else . end
+    ' > "$TF_RESOURCES_FILE.tmp" && mv "$TF_RESOURCES_FILE.tmp" "$TF_RESOURCES_FILE"
+  else
+    # Simple fallback - just log
+    echo "{\"name\":\"$name\",\"action\":\"$action\",\"message\":\"$message\"}" >> "$TF_RESOURCES_FILE.log"
+  fi
+}
+
+# Parse terraform output and track resources
+tf_abbrev_and_track() {
+  local line action name
+  while IFS= read -r line; do
+    # Parse terraform resource lines
+    if [[ "$line" =~ ^([a-zA-Z0-9_.-]+(\[[0-9]+\])?):\ (Creating|Modifying|Destroying|Refreshing)\.\.\.$ ]]; then
+      name="${BASH_REMATCH[1]}"
+      action="${BASH_REMATCH[3],,}"  # lowercase
+      update_tf_resource "$name" "$action" ""
+    elif [[ "$line" =~ ^([a-zA-Z0-9_.-]+(\[[0-9]+\])?):\ (Creation|Modifications|Destruction)\ complete ]]; then
+      name="${BASH_REMATCH[1]}"
+      update_tf_resource "$name" "complete" ""
+    elif [[ "$line" =~ ^([a-zA-Z0-9_.-]+(\[[0-9]+\])?):\ Still\ (creating|modifying|destroying)\.\.\.\ \[([0-9]+[sm])\ elapsed\] ]]; then
+      name="${BASH_REMATCH[1]}"
+      action="${BASH_REMATCH[3]}"
+      elapsed="${BASH_REMATCH[4]}"
+      update_tf_resource "$name" "$action" "$elapsed"
+    fi
+    
+    # Also abbreviate and print
+    echo "$line" | sed -E \
+      -e 's/null_resource\.cluster_health_checks/health/g' \
+      -e 's/null_resource\.wait_for_api/wait_api/g' \
+      -e 's/null_resource\.bootstrap_talos/bootstrap/g' \
+      -e 's/null_resource\.cluster_config/config/g' \
+      -e 's/null_resource\.talos_upgrade/upgrade/g' \
+      -e 's/null_resource\.apply_config/apply_cfg/g' \
+      -e 's/local_sensitive_file\./file:/g' \
+      -e 's/proxmox_virtual_environment_vm\./vm:/g' \
+      -e 's/talos_machine_configuration_apply\./talos:/g' \
+      -e 's/talos_machine_secrets\./secrets:/g' \
+      -e 's/helm_release\./helm:/g' \
+      -e 's/kubernetes_namespace\./ns:/g' \
+      -e 's/\(local-exec\):/»/g'
+  done
+}
+
 # Abbreviate long terraform resource names in output for readability
 tf_abbrev() {
   sed -E \
@@ -619,14 +743,17 @@ tf_abbrev() {
 terraform_apply() {
   need terraform
   local var_args; var_args="$(terraform_var_file_args)"
+  init_tf_resources
   if [[ -f "$PLANFILE" && "${1:-}" == "--use-plan" ]]; then
     step "terraform apply (using planfile)"
-    ( cd "$WORKDIR" && terraform apply -auto-approve "$PLANFILE" ) 2>&1 | tf_abbrev
+    ( cd "$WORKDIR" && terraform apply -auto-approve "$PLANFILE" ) 2>&1 | tf_abbrev_and_track
   else
     step "terraform apply"
     # shellcheck disable=SC2086
-    ( cd "$WORKDIR" && terraform apply -auto-approve ${var_args} ) 2>&1 | tf_abbrev
+    ( cd "$WORKDIR" && terraform apply -auto-approve ${var_args} ) 2>&1 | tf_abbrev_and_track
   fi
+  # Mark all as complete
+  echo '{"resources":[],"status":"complete","timestamp":"'$(date -Iseconds)'"}' > "$TF_RESOURCES_FILE"
 }
 
 terraform_destroy() {
@@ -710,11 +837,13 @@ write_configs() {
 talos_health() {
   need talosctl
   need kubectl
+  init_talos_status
   local timeout="${TALOS_HEALTH_TIMEOUT:-5m}"
   [[ "${#CONTROLLERS[@]}" -gt 0 ]] || die "No controllers found"
 
   local init_node="${CONTROLLERS[0]}"
   info "Running basic Talos health checks..."
+  update_talos_status "health" "checking" "Running health checks" "$init_node"
   
   if talosctl health --help 2>&1 | grep -q -- '--run-timeout'; then
     timeout 3m talosctl -n "$init_node" health \
@@ -727,13 +856,17 @@ talos_health() {
   else
     timeout 2m talosctl -n "$init_node" health --wait-timeout 1m --server=false 2>&1 | head -50 || true
   fi
+  update_talos_status "health" "complete" "Health OK"
   
   info "Verifying Kubernetes API..."
+  update_talos_status "k8s-api" "checking" "Verifying API"
   if kubectl get nodes >/dev/null 2>&1; then
     info "Kubernetes API is healthy"
     kubectl get nodes
+    update_talos_status "k8s-api" "complete" "API healthy"
   else
     warn "kubectl get nodes failed"
+    update_talos_status "k8s-api" "failed" "API unreachable"
   fi
 }
 
@@ -1484,14 +1617,21 @@ check_cluster_network_access() {
 
 piraeus_install_operator() {
   need kubectl
+  init_linstor_status
   step "piraeus install"
+  update_linstor_status "operator" "installing" "Applying manifests"
   kubectl apply --server-side --force-conflicts -k "https://github.com/piraeusdatastore/piraeus-operator/config/default?ref=v${PIRAEUS_OPERATOR_VERSION}"
+  update_linstor_status "operator" "complete" "Manifests applied"
 }
 
 piraeus_wait_operator() {
   step "piraeus wait operator"
+  update_linstor_status "controller-manager" "waiting" "Waiting for rollout"
   kubectl -n piraeus-datastore rollout status deploy/piraeus-operator-controller-manager --timeout=10m
+  update_linstor_status "controller-manager" "complete" "Ready"
+  update_linstor_status "gencert" "waiting" "Waiting for rollout"
   kubectl -n piraeus-datastore rollout status deploy/piraeus-operator-gencert --timeout=10m
+  update_linstor_status "gencert" "complete" "Ready"
 }
 
 piraeus_relax_webhooks() {
@@ -1691,23 +1831,30 @@ YAML
 
 piraeus_apply_cluster_resources() {
   step "piraeus configure"
+  update_linstor_status "lvm-init" "creating" "DaemonSet"
   render_lvm_init_daemonset       | kubectl apply -f -
+  update_linstor_status "storage-pool-cfg" "creating" "Config"
   render_storage_pool_configs     | kubectl apply -f -
+  update_linstor_status "linstorcluster" "creating" "Cluster CR"
   render_linstorcluster           | kubectl apply -f -
+  update_linstor_status "storageclass" "creating" "StorageClass"
   render_storageclass             | kubectl apply -f -
+  update_linstor_status "resources" "complete" "Applied"
 }
 
 reset_linstor_db_migration() {
   step "reset LINSTOR DB migration state"
-  
+  update_linstor_status "db-reset" "running" "Clearing DB"
   kubectl delete secrets -n piraeus-datastore -l piraeus.io/linstor-backup --ignore-not-found 2>/dev/null || true
   kubectl delete linstorremotedatabases.internal.linstor.linbit.com --all -n piraeus-datastore --ignore-not-found 2>/dev/null || true
   kubectl delete pod -n piraeus-datastore -l app.kubernetes.io/component=linstor-controller --ignore-not-found 2>/dev/null || true
   sleep 5
+  update_linstor_status "db-reset" "complete" "Reset done"
 }
 
 wait_linstor_ready() {
   step "piraeus wait datastore"
+  update_linstor_status "linstor-controller" "waiting" "Starting"
   local start_time=$SECONDS
   local timeout_seconds=900
   
@@ -1724,18 +1871,25 @@ wait_linstor_ready() {
     satellite_ready=$(kubectl get pods -n piraeus-datastore -l app.kubernetes.io/component=linstor-satellite --no-headers 2>/dev/null | grep -c "2/2.*Running" || echo 0)
     linstor_status=$(kubectl get linstorcluster linstor -n piraeus-datastore -o jsonpath='{.status.conditions[?(@.type=="Available")].status}' 2>/dev/null || echo "Unknown")
     
+    # Update dashboard status
+    update_linstor_status "linstor-controller" "waiting" "$controller_status"
+    update_linstor_status "satellites" "waiting" "$satellite_ready/$satellite_count"
+    
     printf "\r\033[K  [%02d:%02d] Controller: %-15s | Satellites: %s/%s ready | LinstorCluster: %s" \
       "$elapsed_min" "$elapsed_sec" "$controller_status" "$satellite_ready" "$satellite_count" "$linstor_status"
     
     if [[ "$linstor_status" == "True" ]]; then
       echo ""
       progress_done "LinstorCluster is Available (${elapsed_min}m ${elapsed_sec}s)"
+      update_linstor_status "linstor-controller" "complete" "Running"
+      update_linstor_status "satellites" "complete" "$satellite_ready ready"
       return 0
     fi
     
     if [[ $elapsed -ge $timeout_seconds ]]; then
       echo ""
       progress_fail "Timeout waiting for LinstorCluster"
+      update_linstor_status "linstor-controller" "failed" "Timeout"
       break
     fi
     
@@ -1761,13 +1915,16 @@ wait_linstor_ready() {
 
 wait_satellites_ready() {
   step "piraeus wait satellites"
+  update_linstor_status "satellite-pods" "waiting" "Waiting for Ready"
   
   if kubectl -n piraeus-datastore wait pod -l app.kubernetes.io/component=linstor-satellite --for=condition=Ready --timeout="$WAIT_SATELLITE_PODS_TIMEOUT" 2>/dev/null; then
     info "✓ Satellites are Ready"
+    update_linstor_status "satellite-pods" "complete" "All ready"
     return 0
   fi
   
   warn "Satellites not Ready after timeout. Continuing anyway..."
+  update_linstor_status "satellite-pods" "failed" "Timeout"
   return 0
 }
 
@@ -1776,6 +1933,7 @@ configure_linstor_storage_pools() {
   need kubectl
 
   step "configure LINSTOR storage pools"
+  update_linstor_status "storage-pools" "creating" "Configuring"
 
   local linstor_pod
   linstor_pod=$(kubectl -n piraeus-datastore get pod -l app.kubernetes.io/component=linstor-controller -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
