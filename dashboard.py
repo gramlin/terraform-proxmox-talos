@@ -80,17 +80,34 @@ class ClusterDashboard:
     def __init__(self, workdir: str = "."):
         self.console = Console()
         self.workdir = workdir
-        self.kubeconfig = os.path.join(workdir, "kubeconfig")
+        # Try multiple kubeconfig locations
+        self.kubeconfig = self._find_kubeconfig()
         self.steps: list[Step] = []
         self.current_step = 0
         self.lock = threading.Lock()
         self._init_steps()
 
+    def _find_kubeconfig(self) -> str:
+        """Find kubeconfig file in common locations"""
+        candidates = [
+            os.path.join(self.workdir, "kubeconfig.yml"),
+            os.path.join(self.workdir, "kubeconfig.raw.yml"),
+            os.path.join(self.workdir, "kubeconfig.lens.yml"),
+            os.path.join(self.workdir, "kubeconfig"),
+            os.environ.get("KUBECONFIG", ""),
+            os.path.expanduser("~/.kube/config"),
+        ]
+        for path in candidates:
+            if path and os.path.isfile(path):
+                return path
+        # Default fallback
+        return os.path.join(self.workdir, "kubeconfig.yml")
+
     def _init_steps(self):
         """Initialize deployment steps"""
         self.steps = [
-            Step("terraform", "Infrastructure Provisioning", 
-                 substeps=["VMs created", "Network configured", "Talos bootstrapped"]),
+            Step("terraform", "Infrastructure Provisioning",
+                 check_fn=self._check_terraform),
             Step("talos_health", "Talos Cluster Health",
                  check_fn=self._check_talos_health),
             Step("cilium", "Cilium CNI",
@@ -110,6 +127,22 @@ class ClusterDashboard:
             Step("harbor", "Harbor Registry",
                  check_fn=self._check_harbor),
         ]
+
+    def _check_terraform(self) -> tuple[Status, str]:
+        """Check if terraform has been applied"""
+        tfstate = os.path.join(self.workdir, "terraform.tfstate")
+        if not os.path.isfile(tfstate):
+            return Status.PENDING, "No state file"
+        try:
+            with open(tfstate) as f:
+                import json
+                state = json.load(f)
+                resources = state.get("resources", [])
+                if len(resources) > 0:
+                    return Status.SUCCESS, f"{len(resources)} resources"
+                return Status.PENDING, "No resources"
+        except Exception as e:
+            return Status.WAITING, "State exists"
 
     def _kubectl(self, args: list[str], timeout: int = 10) -> tuple[bool, str]:
         """Run kubectl command and return (success, output)"""
@@ -136,9 +169,17 @@ class ClusterDashboard:
 
     # Check functions for each step
     def _check_talos_health(self) -> tuple[Status, str]:
+        # First check if kubeconfig exists
+        if not os.path.isfile(self.kubeconfig):
+            return Status.WAITING, f"No kubeconfig yet"
+        
         success, output = self._kubectl(["get", "nodes", "-o", "json"])
         if not success:
-            return Status.FAILED, "Cannot connect to cluster"
+            if "connection refused" in output.lower():
+                return Status.WAITING, "Cluster starting..."
+            if "no such host" in output.lower() or "timeout" in output.lower():
+                return Status.WAITING, "Waiting for API..."
+            return Status.WAITING, "Connecting..."
         try:
             data = json.loads(output)
             nodes = data.get("items", [])
@@ -150,7 +191,7 @@ class ClusterDashboard:
                 return Status.SUCCESS, f"{ready}/{total} nodes ready"
             return Status.WAITING, f"{ready}/{total} nodes ready"
         except:
-            return Status.FAILED, "Parse error"
+            return Status.WAITING, "Parsing..."
 
     def _check_cilium(self) -> tuple[Status, str]:
         success, output = self._kubectl([
