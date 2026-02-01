@@ -220,10 +220,34 @@ _log_err() {
   fi
 }
 
-step() { _log ""; _log "### $* ###"; }
+# Dashboard status file for current step
+DASHBOARD_STATUS_FILE="${WORKDIR}/.dashboard-status.json"
+
+# Update dashboard with current step
+update_dashboard_step() {
+  local step_name="$1"
+  local step_status="${2:-running}"  # running, complete, failed
+  local step_message="${3:-}"
+  
+  if command -v jq &>/dev/null; then
+    jq -n --arg s "$step_name" --arg st "$step_status" --arg m "$step_message" --arg t "$(date -Iseconds)" \
+      '{current_step: $s, status: $st, message: $m, timestamp: $t}' > "$DASHBOARD_STATUS_FILE" 2>/dev/null || true
+  else
+    echo "{\"current_step\":\"$step_name\",\"status\":\"$step_status\",\"message\":\"$step_message\",\"timestamp\":\"$(date -Iseconds)\"}" > "$DASHBOARD_STATUS_FILE"
+  fi
+}
+
+step() { 
+  _log ""; _log "### $* ###"
+  update_dashboard_step "$*" "running"
+}
 info() { _log "INFO: $*"; }
 warn() { _log_err "WARN: $*"; }
-die() { _log_err "ERROR: $*"; exit 1; }
+die() { 
+  _log_err "ERROR: $*"
+  update_dashboard_step "ERROR" "failed" "$*"
+  exit 1
+}
 
 # Progress spinner
 SPINNER_PID=""
@@ -653,24 +677,30 @@ update_proxmox_status() {
     "${endpoint}/api2/json/nodes/${node}/qemu" 2>/dev/null) || return 0
   
   if command -v jq &>/dev/null && [[ -n "$vms_json" ]]; then
-    # Filter VMs by prefix if set, otherwise show all
-    local filter_pattern="${vm_prefix:-.*}"
-    echo "$vms_json" | jq --arg t "$(date -Iseconds)" --arg pat "$filter_pattern" '
-      {
-        timestamp: $t,
-        status: "running",
-        vms: [.data[] | select(.name | test($pat; "i")) | {
-          vmid: .vmid,
-          name: .name,
-          status: .status,
-          cpu: (.cpu // 0 | . * 100 | floor),
-          mem: (if .maxmem > 0 then ((.mem // 0) / .maxmem * 100 | floor) else 0 end),
-          uptime: .uptime,
-          netin: .netin,
-          netout: .netout
-        }]
-      }
-    ' > "$PROXMOX_STATUS_FILE" 2>/dev/null || true
+    # Filter VMs by prefix - must START with prefix (e.g., "cure-")
+    # If no prefix set, show nothing (avoid showing unrelated VMs)
+    if [[ -n "$vm_prefix" ]]; then
+      local filter_pattern="^${vm_prefix}"
+      echo "$vms_json" | jq --arg t "$(date -Iseconds)" --arg pat "$filter_pattern" '
+        {
+          timestamp: $t,
+          status: "running",
+          vms: [.data[] | select(.name | test($pat; "i")) | {
+            vmid: .vmid,
+            name: .name,
+            status: .status,
+            cpu: (.cpu // 0 | . * 100 | floor),
+            mem: (if .maxmem > 0 then ((.mem // 0) / .maxmem * 100 | floor) else 0 end),
+            uptime: .uptime,
+            netin: .netin,
+            netout: .netout
+          }]
+        }
+      ' > "$PROXMOX_STATUS_FILE" 2>/dev/null || true
+    else
+      # No prefix - create empty status
+      echo '{"timestamp":"'$(date -Iseconds)'","status":"running","vms":[]}' > "$PROXMOX_STATUS_FILE"
+    fi
   fi
 }
 

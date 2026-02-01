@@ -376,6 +376,19 @@ class ClusterDashboard:
         
         tfstate = os.path.join(self.workdir, "terraform.tfstate")
         if not os.path.isfile(tfstate):
+            # Check if terraform is running (VMs being created)
+            tf_file = os.path.join(self.workdir, ".tf-resources.json")
+            if os.path.isfile(tf_file):
+                try:
+                    with open(tf_file) as f:
+                        tf_data = json.load(f)
+                        if tf_data.get("status") == "running":
+                            # Set all checkpoints to waiting (being created)
+                            for cp in checkpoints:
+                                cp.status = Status.WAITING
+                            return Status.WAITING, "Creating..."
+                except:
+                    pass
             return Status.PENDING, "No state"
         
         try:
@@ -391,27 +404,37 @@ class ClusterDashboard:
                             status = inst.get("attributes", {}).get("started", False)
                             vm_names.append((name, status))
                 
-                # Map to checkpoints
-                cp_map = {
-                    "ctrl1": ["ctrl-1", "ctrl1", "controller-1", "cp-1"],
-                    "ctrl2": ["ctrl-2", "ctrl2", "controller-2", "cp-2"],
-                    "wk1": ["work-1", "worker-1", "wk-1", "wk1"],
-                    "wk2": ["work-2", "worker-2", "wk-2", "wk2"],
-                    "wk3": ["work-3", "worker-3", "wk-3", "wk3"],
-                    "wk4": ["work-4", "worker-4", "wk-4", "wk4"],
-                }
-                
+                # Map to checkpoints - match by position number in name
+                # Controllers have "cp" and workers have "wk" in their names
                 running = 0
-                for i, cp in enumerate(checkpoints):
-                    for vm_name, started in vm_names:
-                        for pattern in cp_map.get(cp.name, []):
-                            if pattern in vm_name.lower():
-                                if started:
-                                    cp.status = Status.SUCCESS
-                                    running += 1
-                                else:
-                                    cp.status = Status.WAITING
-                                break
+                matched_cps = set()
+                
+                for vm_name, started in vm_names:
+                    vm_lower = vm_name.lower()
+                    cp_idx = None
+                    
+                    # Match controllers: erwecp1, erwecp2, cp1, cp2, controller1, ctrl1
+                    if "cp1" in vm_lower or "controller1" in vm_lower or "ctrl1" in vm_lower or vm_lower.endswith("cp-1"):
+                        cp_idx = 0
+                    elif "cp2" in vm_lower or "controller2" in vm_lower or "ctrl2" in vm_lower or vm_lower.endswith("cp-2"):
+                        cp_idx = 1
+                    # Match workers: erwewk1-4, wk1-4, worker1-4
+                    elif "wk1" in vm_lower or "worker1" in vm_lower or "work1" in vm_lower or vm_lower.endswith("wk-1"):
+                        cp_idx = 2
+                    elif "wk2" in vm_lower or "worker2" in vm_lower or "work2" in vm_lower or vm_lower.endswith("wk-2"):
+                        cp_idx = 3
+                    elif "wk3" in vm_lower or "worker3" in vm_lower or "work3" in vm_lower or vm_lower.endswith("wk-3"):
+                        cp_idx = 4
+                    elif "wk4" in vm_lower or "worker4" in vm_lower or "work4" in vm_lower or vm_lower.endswith("wk-4"):
+                        cp_idx = 5
+                    
+                    if cp_idx is not None and cp_idx < len(checkpoints):
+                        matched_cps.add(cp_idx)
+                        if started:
+                            checkpoints[cp_idx].status = Status.SUCCESS
+                            running += 1
+                        else:
+                            checkpoints[cp_idx].status = Status.WAITING
                 
                 if running >= 6:
                     return Status.SUCCESS, f"{running} running"
@@ -1236,6 +1259,32 @@ class ClusterDashboard:
         table.add_column("", width=8, style="#000000")
         table.add_column("", width=2)
         table.add_column("", width=8, style="#444444")
+        
+        # Show current script step from do script
+        dashboard_status = self._load_dashboard_status()
+        current_step = dashboard_status.get("current_step", "")
+        step_status = dashboard_status.get("status", "")
+        
+        if current_step:
+            # Truncate long step names
+            step_display = current_step[:20]
+            if step_status == "running":
+                spinner = SPINNER_FRAMES[self.frame % len(SPINNER_FRAMES)]
+                table.add_row(
+                    Text("▶ Script", style="bold #0066AA"),
+                    Text(step_display[:8], style="#000000"),
+                    Text(spinner, style="bold #FFAA33"),
+                    Text("", style="#666666")
+                )
+            elif step_status == "failed":
+                table.add_row(
+                    Text("✗ Script", style="bold #FF3333"),
+                    Text(step_display[:8], style="#000000"),
+                    Text("!", style="bold #FF3333"),
+                    Text("FAIL", style="#FF3333")
+                )
+            table.add_row(Text("", style="#666666"), Text("", style="#666666"), Text("", style="#666666"), Text("", style="#666666"))
+        
         for step in self.steps:
             if step.status in (Status.WAITING, Status.FAILED, Status.RUNNING) or any(cp.status in (Status.WAITING, Status.FAILED) for cp in step.checkpoints):
                 for cp in step.checkpoints:
@@ -1310,11 +1359,19 @@ class ClusterDashboard:
         
         text.append(f"╠{border}╣\n", style="#444444")
         
-        # Scrolling status message
+        # Scrolling status message - show current script step
         text.append("║ ", style="#444444")
+        
+        # Get current step from do script
+        dashboard_status = self._load_dashboard_status()
+        script_step = dashboard_status.get("current_step", "")
+        
         active_step = next((s for s in self.steps if s.status == Status.WAITING), None)
         if all_done:
             message = "★ CLUSTER READY ★ ALL COMPONENTS DEPLOYED ★ "
+        elif script_step:
+            # Show what the script is actually doing right now
+            message = f">>> {script_step.upper()} <<< "
         elif active_step:
             message = f">>> {active_step.name.upper()}: {active_step.message or 'Processing...'} <<< "
         else:
@@ -1571,6 +1628,20 @@ class ClusterDashboard:
             table.add_row(Text(name, style="#000000"), status)
         
         return table
+
+    def _load_dashboard_status(self) -> dict:
+        """Load current step from do script"""
+        status_file = os.path.join(self.workdir, ".dashboard-status.json")
+        if os.path.exists(status_file):
+            try:
+                mtime = os.path.getmtime(status_file)
+                # Only show if updated in last 60 seconds
+                if time.time() - mtime < 60:
+                    with open(status_file, "r") as f:
+                        return json.load(f)
+            except (json.JSONDecodeError, IOError, OSError):
+                pass
+        return {}
 
     def _load_tf_resources(self) -> dict:
         """Load terraform resources from JSON file"""
@@ -1980,6 +2051,17 @@ class ClusterDashboard:
             text.append(f"  {activity}", style="#FFAA33")
         else:
             text.append("  ●", style="#33FF33")
+        
+        # Show current script step
+        dashboard_status = self._load_dashboard_status()
+        script_step = dashboard_status.get("current_step", "")
+        if script_step and not all_done:
+            # Truncate and show current operation
+            step_short = script_step[:25]
+            text.append("  │ ", style="#444444")
+            spinner = SPINNER_FRAMES[self.frame % len(SPINNER_FRAMES)]
+            text.append(f"{spinner} ", style="#FFAA33")
+            text.append(step_short, style="#000000")
         
         return text
 
