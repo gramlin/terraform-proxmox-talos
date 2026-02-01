@@ -229,6 +229,9 @@ update_dashboard_step() {
   local step_status="${2:-running}"  # running, complete, failed
   local step_message="${3:-}"
   
+  # Ensure file path is set
+  DASHBOARD_STATUS_FILE="${DASHBOARD_STATUS_FILE:-${WORKDIR}/.dashboard-status.json}"
+  
   if command -v jq &>/dev/null; then
     jq -n --arg s "$step_name" --arg st "$step_status" --arg m "$step_message" --arg t "$(date -Iseconds)" \
       '{current_step: $s, status: $st, message: $m, timestamp: $t}' > "$DASHBOARD_STATUS_FILE" 2>/dev/null || true
@@ -622,22 +625,27 @@ terraform_plan() {
   info "Plan written to: $PLANFILE"
 }
 
-# Terraform resource status file for dashboard
-export TF_RESOURCES_FILE="${WORKDIR}/.tf-resources.json"
-export TALOS_STATUS_FILE="${WORKDIR}/.talos-status.json"
-export LINSTOR_STATUS_FILE="${WORKDIR}/.linstor-status.json"
-export PROXMOX_STATUS_FILE="${WORKDIR}/.proxmox-status.json"
-export DASHBOARD_STATUS_FILE="${WORKDIR}/.dashboard-status.json"
-
 # Initialize all dashboard status files (call at start of any command)
 init_dashboard_status() {
+  # Set file paths using current WORKDIR
+  export TF_RESOURCES_FILE="${WORKDIR}/.tf-resources.json"
+  export TALOS_STATUS_FILE="${WORKDIR}/.talos-status.json"
+  export LINSTOR_STATUS_FILE="${WORKDIR}/.linstor-status.json"
+  export PROXMOX_STATUS_FILE="${WORKDIR}/.proxmox-status.json"
+  export DASHBOARD_STATUS_FILE="${WORKDIR}/.dashboard-status.json"
+  
   local ts
   ts=$(date -Iseconds)
+  
+  # Clear all status files
   echo '{"resources":[],"status":"idle","timestamp":"'"$ts"'"}' > "$TF_RESOURCES_FILE"
   echo '{"operations":[],"status":"idle","timestamp":"'"$ts"'"}' > "$TALOS_STATUS_FILE"
   echo '{"operations":[],"status":"idle","timestamp":"'"$ts"'"}' > "$LINSTOR_STATUS_FILE"
   echo '{"vms":[],"status":"idle","timestamp":"'"$ts"'"}' > "$PROXMOX_STATUS_FILE"
   echo '{"current_step":"Starting...","status":"running","message":"","timestamp":"'"$ts"'"}' > "$DASHBOARD_STATUS_FILE"
+  
+  info "Dashboard status files cleared"
+  info "Dashboard status files cleared"
 }
 
 # Initialize terraform resources tracking
