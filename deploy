@@ -82,8 +82,9 @@ if command -v tmux >/dev/null && [[ -z "${TMUX:-}" ]]; then
             # Kill existing session if any
             tmux kill-session -t deploy 2>/dev/null || true
             # Create session with do script (33% width on the left)
+            # When script finishes, show completion and wait - Ctrl+C in dashboard exits
             tmux new-session -d -s deploy -n main -x "$(tput cols)" -y "$(tput lines)" \
-                "cd '$SCRIPT_DIR' && ./do $DO_CMD $*; echo ''; echo 'Press Enter to close...'; read"
+                "cd '$SCRIPT_DIR' && ./do $DO_CMD $*; echo ''; echo '══════════════════════════════════════'; echo '  ✓ Script complete. Dashboard running.'; echo '  Press Ctrl+C in dashboard to exit.'; echo '══════════════════════════════════════'; while true; do sleep 60; done"
             # Split for dashboard (67% width on the right)
             tmux split-window -h -t deploy:main \
                 "cd '$SCRIPT_DIR' && .venv/bin/python dashboard.py $BLINKENLICHT"

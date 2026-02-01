@@ -348,14 +348,16 @@ class ClusterDashboard:
                 state = json.load(f)
                 resources = state.get("resources", [])
                 
-                # Check for controller VMs
-                ctrl_vms = [r for r in resources if "proxmox" in r.get("type", "") and "controller" in r.get("name", "")]
+                # Check for controller VMs (match "controller" or "cp" in name)
+                ctrl_vms = [r for r in resources if "proxmox" in r.get("type", "") and 
+                           ("controller" in r.get("name", "") or "cp" in r.get("name", "").lower())]
                 if ctrl_vms:
                     checkpoints[1].status = Status.SUCCESS
                     checkpoints[1].message = str(len(ctrl_vms))
                 
-                # Check for worker VMs
-                worker_vms = [r for r in resources if "proxmox" in r.get("type", "") and "worker" in r.get("name", "")]
+                # Check for worker VMs (match "worker" or "wk" in name)
+                worker_vms = [r for r in resources if "proxmox" in r.get("type", "") and 
+                             ("worker" in r.get("name", "") or "wk" in r.get("name", "").lower())]
                 if worker_vms:
                     checkpoints[2].status = Status.SUCCESS
                     checkpoints[2].message = str(len(worker_vms))
@@ -490,7 +492,7 @@ class ClusterDashboard:
                 "etcd": checkpoints[0],
                 "kube-apiserver": checkpoints[1],
                 "kube-scheduler": checkpoints[2],
-                "kube-controller": checkpoints[3],
+                "kube-controller-manager": checkpoints[3],
             }
             
             for pod in pods:
@@ -523,30 +525,33 @@ class ClusterDashboard:
             data = json.loads(output)
             nodes = data.get("items", [])
             
-            cp_map = {
-                "c1": ["ctrl-1", "ctrl1", "controller-1", "cp-1"],
-                "c2": ["ctrl-2", "ctrl2", "controller-2", "cp-2"],
-                "w1": ["work-1", "worker-1", "wk-1", "wk1"],
-                "w2": ["work-2", "worker-2", "wk-2", "wk2"],
-                "w3": ["work-3", "worker-3", "wk-3", "wk3"],
-                "w4": ["work-4", "worker-4", "wk-4", "wk4"],
-            }
-            
             ready_count = 0
             for node in nodes:
-                name = node.get("metadata", {}).get("name", "")
+                name = node.get("metadata", {}).get("name", "").lower()
                 conditions = node.get("status", {}).get("conditions", [])
                 is_ready = any(c["type"] == "Ready" and c["status"] == "True" for c in conditions)
                 
-                for i, cp in enumerate(checkpoints):
-                    for pattern in cp_map.get(cp.name, []):
-                        if pattern in name.lower():
-                            if is_ready:
-                                cp.status = Status.SUCCESS
-                                ready_count += 1
-                            else:
-                                cp.status = Status.WAITING
-                            break
+                # Match by position number in name
+                cp_idx = None
+                if "cp1" in name or "controller1" in name or "ctrl1" in name or name.endswith("cp-1"):
+                    cp_idx = 0
+                elif "cp2" in name or "controller2" in name or "ctrl2" in name or name.endswith("cp-2"):
+                    cp_idx = 1
+                elif "wk1" in name or "worker1" in name or "work1" in name or name.endswith("wk-1"):
+                    cp_idx = 2
+                elif "wk2" in name or "worker2" in name or "work2" in name or name.endswith("wk-2"):
+                    cp_idx = 3
+                elif "wk3" in name or "worker3" in name or "work3" in name or name.endswith("wk-3"):
+                    cp_idx = 4
+                elif "wk4" in name or "worker4" in name or "work4" in name or name.endswith("wk-4"):
+                    cp_idx = 5
+                
+                if cp_idx is not None and cp_idx < len(checkpoints):
+                    if is_ready:
+                        checkpoints[cp_idx].status = Status.SUCCESS
+                        ready_count += 1
+                    else:
+                        checkpoints[cp_idx].status = Status.WAITING
             
             total = len(nodes)
             if ready_count >= 6:
@@ -646,50 +651,57 @@ class ClusterDashboard:
         step = self._get_step("piraeus")
         checkpoints = step.checkpoints
         
+        # Check for LINSTOR CRDs
         success, output = self._kubectl(["get", "crd", "-o", "name"])
         if success and "linstor" in output.lower():
             checkpoints[0].status = Status.SUCCESS
         
-        success, output = self._kubectl(["get", "pods", "-n", "piraeus-datastore", "-l", "app.kubernetes.io/name=piraeus-operator", "-o", "json"])
+        # Check operator pod - try multiple label patterns
+        success, output = self._kubectl(["get", "pods", "-n", "piraeus-datastore", "-o", "json"])
         if not success:
             return Status.PENDING, "Not installed"
+        
         try:
             data = json.loads(output)
             pods = data.get("items", [])
-            running = sum(1 for p in pods if p.get("status", {}).get("phase") == "Running")
-            if running > 0:
-                checkpoints[1].status = Status.SUCCESS
+            
+            operator_running = False
+            csi_ctrl_running = False
+            csi_node_count = 0
+            csi_node_ready = 0
+            
+            for p in pods:
+                name = p.get("metadata", {}).get("name", "")
+                phase = p.get("status", {}).get("phase")
+                
+                # Operator pod
+                if "operator" in name and phase == "Running":
+                    operator_running = True
+                    checkpoints[1].status = Status.SUCCESS
+                
+                # CSI controller
+                if "csi-controller" in name or ("csi" in name and "controller" in name):
+                    if phase == "Running":
+                        csi_ctrl_running = True
+                        checkpoints[2].status = Status.SUCCESS
+                    else:
+                        checkpoints[2].status = Status.WAITING
+                
+                # CSI node pods
+                if "csi-node" in name or ("csi" in name and "node" in name):
+                    csi_node_count += 1
+                    if phase == "Running":
+                        csi_node_ready += 1
+            
+            if csi_node_count > 0:
+                checkpoints[3].message = f"{csi_node_ready}/{csi_node_count}"
+                if csi_node_ready == csi_node_count:
+                    checkpoints[3].status = Status.SUCCESS
+                elif csi_node_ready > 0:
+                    checkpoints[3].status = Status.WAITING
+            
         except:
             pass
-        
-        # CSI controller
-        success, output = self._kubectl(["get", "pods", "-n", "piraeus-datastore", "-l", "app.kubernetes.io/component=linstor-csi-controller", "-o", "json"])
-        if success:
-            try:
-                data = json.loads(output)
-                pods = data.get("items", [])
-                running = sum(1 for p in pods if p.get("status", {}).get("phase") == "Running")
-                if running > 0:
-                    checkpoints[2].status = Status.SUCCESS
-                elif pods:
-                    checkpoints[2].status = Status.WAITING
-            except:
-                pass
-        
-        # CSI node pods
-        success, output = self._kubectl(["get", "pods", "-n", "piraeus-datastore", "-l", "app.kubernetes.io/component=linstor-csi-node", "-o", "json"])
-        if success:
-            try:
-                data = json.loads(output)
-                pods = data.get("items", [])
-                running = sum(1 for p in pods if p.get("status", {}).get("phase") == "Running")
-                checkpoints[3].message = f"{running}"
-                if running == len(pods) and running > 0:
-                    checkpoints[3].status = Status.SUCCESS
-                elif running > 0:
-                    checkpoints[3].status = Status.WAITING
-            except:
-                pass
         
         done = sum(1 for cp in checkpoints if cp.status == Status.SUCCESS)
         if done == len(checkpoints):
