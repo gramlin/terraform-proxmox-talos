@@ -640,39 +640,55 @@ class ClusterDashboard:
             return Status.WAITING, "Parsing"
 
     def _check_cilium(self) -> tuple:
+        """Check Cilium CNI - just verify pods are running"""
         step = self._get_step("cilium")
         checkpoints = step.checkpoints
-        success, output = self._kubectl(["get", "pods", "-n", "kube-system", "-l", "app.kubernetes.io/name=cilium", "-o", "json"])
+        pods = []
+        
+        # Get all pods in kube-system and filter by name
+        success, output = self._kubectl(["get", "pods", "-n", "kube-system", "-o", "json"])
         if not success:
-            return Status.WAITING, "Checking"
+            return Status.WAITING, "No kubectl"
+        
         try:
             data = json.loads(output)
-            pods = data.get("items", [])
-            
-            # Find operator
-            operators = [p for p in pods if "operator" in p.get("metadata", {}).get("name", "")]
-            agents = [p for p in pods if "cilium-" in p.get("metadata", {}).get("name", "") and "operator" not in p.get("metadata", {}).get("name", "") and "envoy" not in p.get("metadata", {}).get("name", "")]
-            
+            all_pods = data.get("items", [])
+            # Filter for cilium pods (cilium-XXXXX format, not envoy/operator)
+            for p in all_pods:
+                name = p.get("metadata", {}).get("name", "")
+                if name.startswith("cilium-") and "envoy" not in name:
+                    pods.append(p)
+        except Exception as e:
+            return Status.FAILED, f"JSON error"
+        
+        if not pods:
+            return Status.WAITING, "No pods"
+        
+        try:
             def is_running(p): return p.get("status", {}).get("phase") == "Running"
             
-            # Operator
+            # Find operator and agents by name pattern
+            operators = [p for p in pods if "operator" in p.get("metadata", {}).get("name", "")]
+            # Agents are cilium-XXXXX (random suffix), not operator
+            agents = [p for p in pods if not "operator" in p.get("metadata", {}).get("name", "")]
+            
+            # Operator checkpoint (index 0)
             if operators and is_running(operators[0]):
                 checkpoints[0].status = Status.SUCCESS
             elif operators:
                 checkpoints[0].status = Status.WAITING
             
-            # Individual agents (ag1-ag6)
-            for i, agent in enumerate(agents[:6]):
+            # Agent checkpoints (index 1-6)
+            running_agents = [a for a in agents if is_running(a)]
+            for i in range(min(len(running_agents), 6)):
                 if i + 1 < len(checkpoints):
-                    if is_running(agent):
-                        checkpoints[i + 1].status = Status.SUCCESS
-                    else:
-                        checkpoints[i + 1].status = Status.WAITING
+                    checkpoints[i + 1].status = Status.SUCCESS
             
             running = sum(1 for p in pods if is_running(p))
-            if running == len(pods) and len(pods) > 0:
-                return Status.SUCCESS, f"{len(pods)} pods"
-            return Status.WAITING, f"{running}/{len(pods)}"
+            total = len(pods)
+            if running == total and total > 0:
+                return Status.SUCCESS, f"{running} pods"
+            return Status.WAITING, f"{running}/{total}"
         except:
             return Status.FAILED, "Error"
 
