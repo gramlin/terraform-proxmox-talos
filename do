@@ -278,6 +278,125 @@ wait_progress() {
   done
 }
 
+# Wait for all pods in a namespace to be ready (no timeout)
+wait_pods_ready() {
+  local ns="$1"
+  local label="${2:-}"
+  local start=$SECONDS
+  
+  local selector=""
+  [[ -n "$label" ]] && selector="-l $label"
+  
+  info "Waiting for pods in $ns to be ready..."
+  
+  while true; do
+    local elapsed=$((SECONDS - start))
+    local elapsed_min=$((elapsed / 60))
+    local elapsed_sec=$((elapsed % 60))
+    
+    # Get pod counts
+    local total ready pending failed creating
+    total=$(kubectl get pods -n "$ns" $selector --no-headers 2>/dev/null | wc -l | tr -d ' ')
+    ready=$(kubectl get pods -n "$ns" $selector --no-headers 2>/dev/null | grep -cE "Running.*([0-9]+)/\1" || echo 0)
+    pending=$(kubectl get pods -n "$ns" $selector --no-headers 2>/dev/null | grep -c "Pending" || echo 0)
+    creating=$(kubectl get pods -n "$ns" $selector --no-headers 2>/dev/null | grep -cE "ContainerCreating|Init|PodInitializing" || echo 0)
+    failed=$(kubectl get pods -n "$ns" $selector --no-headers 2>/dev/null | grep -cE "Error|CrashLoopBackOff|ImagePullBackOff|ErrImagePull" || echo 0)
+    
+    # Get PVC status
+    local pvc_total pvc_bound pvc_pending
+    pvc_total=$(kubectl get pvc -n "$ns" --no-headers 2>/dev/null | wc -l | tr -d ' ')
+    pvc_bound=$(kubectl get pvc -n "$ns" --no-headers 2>/dev/null | grep -c "Bound" || echo 0)
+    pvc_pending=$(kubectl get pvc -n "$ns" --no-headers 2>/dev/null | grep -c "Pending" || echo 0)
+    
+    # Build status line
+    local status_line="[${elapsed_min}m${elapsed_sec}s] Pods: "
+    
+    # Count actually ready pods (all containers running)
+    local actually_ready=0
+    while IFS= read -r line; do
+      if [[ -n "$line" ]]; then
+        local pod_ready=$(echo "$line" | awk '{print $2}')
+        local pod_status=$(echo "$line" | awk '{print $3}')
+        if [[ "$pod_status" == "Running" ]]; then
+          local containers_ready=$(echo "$pod_ready" | cut -d'/' -f1)
+          local containers_total=$(echo "$pod_ready" | cut -d'/' -f2)
+          if [[ "$containers_ready" == "$containers_total" ]]; then
+            actually_ready=$((actually_ready + 1))
+          fi
+        fi
+      fi
+    done < <(kubectl get pods -n "$ns" $selector --no-headers 2>/dev/null)
+    
+    status_line+="${actually_ready}/${total} ready"
+    [[ $creating -gt 0 ]] && status_line+=", ${creating} creating"
+    [[ $pending -gt 0 ]] && status_line+=", ${pending} pending"
+    [[ $failed -gt 0 ]] && status_line+=", ${failed} FAILED"
+    
+    if [[ $pvc_total -gt 0 ]]; then
+      status_line+=" | PVCs: ${pvc_bound}/${pvc_total}"
+      [[ $pvc_pending -gt 0 ]] && status_line+=" (${pvc_pending} pending)"
+    fi
+    
+    printf "\r\033[K  → %s" "$status_line"
+    
+    # Check if all ready
+    if [[ $total -gt 0 && $actually_ready -eq $total && $pvc_pending -eq 0 ]]; then
+      printf "\r\033[K  ✓ All %d pods ready (%dm%ds)\n" "$total" "$elapsed_min" "$elapsed_sec"
+      return 0
+    fi
+    
+    # Show details for stuck pods every 30 seconds
+    if [[ $((elapsed % 30)) -eq 0 && $elapsed -gt 0 ]]; then
+      echo ""
+      if [[ $pvc_pending -gt 0 ]]; then
+        warn "Pending PVCs:"
+        kubectl get pvc -n "$ns" --no-headers 2>/dev/null | grep "Pending" | while read -r line; do
+          local pvc_name=$(echo "$line" | awk '{print $1}')
+          echo "    - $pvc_name"
+          kubectl describe pvc "$pvc_name" -n "$ns" 2>/dev/null | grep -A2 "Events:" | tail -2 | sed 's/^/      /'
+        done
+      fi
+      if [[ $failed -gt 0 ]]; then
+        warn "Failed pods:"
+        kubectl get pods -n "$ns" $selector --no-headers 2>/dev/null | grep -E "Error|CrashLoopBackOff|ImagePullBackOff" | while read -r line; do
+          local pod_name=$(echo "$line" | awk '{print $1}')
+          local pod_status=$(echo "$line" | awk '{print $3}')
+          echo "    - $pod_name ($pod_status)"
+        done
+      fi
+    fi
+    
+    sleep 3
+  done
+}
+
+# Helm install/upgrade without timeout, with progress
+helm_deploy() {
+  local release="$1"
+  local chart="$2"
+  local ns="$3"
+  local version="$4"
+  shift 4
+  local extra_args=("$@")
+  
+  local cmd="install"
+  helm status "$release" -n "$ns" &>/dev/null && cmd="upgrade"
+  
+  info "${cmd^}ing $release..."
+  
+  # Run helm without --wait, we'll wait ourselves
+  if ! helm $cmd "$release" "$chart" \
+    --namespace "$ns" \
+    --version "$version" \
+    --create-namespace \
+    "${extra_args[@]}"; then
+    die "Helm $cmd failed for $release"
+  fi
+  
+  # Now wait for pods with progress
+  wait_pods_ready "$ns"
+}
+
 show_pod_progress() {
   local ns="${1:-piraeus-datastore}"
   local label="${2:-}"
@@ -1211,10 +1330,10 @@ deploy_traefik() {
     --set providers.kubernetesIngress.enabled=true \
     --set providers.kubernetesIngress.publishedService.enabled=true \
     --set logs.general.level=INFO \
-    --set logs.access.enabled=true \
-    --wait --timeout=5m
+    --set logs.access.enabled=true
 
-  kubectl rollout status deployment/traefik -n "$ns" --timeout=5m
+  # Wait for pods with progress (no timeout)
+  wait_pods_ready "$ns"
 
   info "Traefik deployed!"
   kubectl get svc -n "$ns" traefik
@@ -1314,10 +1433,12 @@ YAML
   helm $cmd harbor harbor/harbor \
     --namespace "$ns" \
     --version "$HARBOR_VERSION" \
-    -f "$values_file" \
-    --wait --timeout=10m
+    -f "$values_file"
   
   rm -f "$values_file"
+
+  # Wait for pods with progress (no timeout)
+  wait_pods_ready "$ns"
 
   info "Harbor deployed!"
   info "  URL: https://$harbor_domain"
@@ -1358,8 +1479,10 @@ deploy_monitoring() {
     --set grafana.ingress.ingressClassName=traefik \
     --set "grafana.ingress.hosts[0]=$grafana_domain" \
     --set alertmanager.alertmanagerSpec.storage.volumeClaimTemplate.spec.storageClassName="$STORAGECLASS_NAME" \
-    --set alertmanager.alertmanagerSpec.storage.volumeClaimTemplate.spec.resources.requests.storage=2Gi \
-    --wait --timeout=10m
+    --set alertmanager.alertmanagerSpec.storage.volumeClaimTemplate.spec.resources.requests.storage=2Gi
+
+  # Wait for pods with progress (no timeout)
+  wait_pods_ready "$ns"
 
   info "Monitoring deployed!"
   info "  Grafana: https://$grafana_domain"
@@ -1397,8 +1520,10 @@ deploy_gitea() {
     --set ingress.className=traefik \
     --set "ingress.hosts[0].host=$gitea_domain" \
     --set "ingress.hosts[0].paths[0].path=/" \
-    --set "ingress.hosts[0].paths[0].pathType=Prefix" \
-    --wait --timeout=10m
+    --set "ingress.hosts[0].paths[0].pathType=Prefix"
+
+  # Wait for pods with progress (no timeout)
+  wait_pods_ready "$ns"
 
   info "Gitea deployed!"
   info "  URL: https://$gitea_domain"
