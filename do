@@ -294,40 +294,45 @@ wait_pods_ready() {
     local elapsed_min=$((elapsed / 60))
     local elapsed_sec=$((elapsed % 60))
     
-    # Get pod counts
-    local total ready pending failed creating
-    total=$(kubectl get pods -n "$ns" $selector --no-headers 2>/dev/null | wc -l | tr -d ' ')
-    ready=$(kubectl get pods -n "$ns" $selector --no-headers 2>/dev/null | grep -cE "Running.*([0-9]+)/\1" || echo 0)
-    pending=$(kubectl get pods -n "$ns" $selector --no-headers 2>/dev/null | grep -c "Pending" || echo 0)
-    creating=$(kubectl get pods -n "$ns" $selector --no-headers 2>/dev/null | grep -cE "ContainerCreating|Init|PodInitializing" || echo 0)
-    failed=$(kubectl get pods -n "$ns" $selector --no-headers 2>/dev/null | grep -cE "Error|CrashLoopBackOff|ImagePullBackOff|ErrImagePull" || echo 0)
+    # Get pod data once
+    local pod_data pvc_data
+    pod_data=$(kubectl get pods -n "$ns" $selector --no-headers 2>/dev/null || true)
+    pvc_data=$(kubectl get pvc -n "$ns" --no-headers 2>/dev/null || true)
     
-    # Get PVC status
-    local pvc_total pvc_bound pvc_pending
-    pvc_total=$(kubectl get pvc -n "$ns" --no-headers 2>/dev/null | wc -l | tr -d ' ')
-    pvc_bound=$(kubectl get pvc -n "$ns" --no-headers 2>/dev/null | grep -c "Bound" || echo 0)
-    pvc_pending=$(kubectl get pvc -n "$ns" --no-headers 2>/dev/null | grep -c "Pending" || echo 0)
-    
-    # Build status line
-    local status_line="[${elapsed_min}m${elapsed_sec}s] Pods: "
-    
-    # Count actually ready pods (all containers running)
-    local actually_ready=0
-    while IFS= read -r line; do
-      if [[ -n "$line" ]]; then
-        local pod_ready=$(echo "$line" | awk '{print $2}')
-        local pod_status=$(echo "$line" | awk '{print $3}')
-        if [[ "$pod_status" == "Running" ]]; then
-          local containers_ready=$(echo "$pod_ready" | cut -d'/' -f1)
-          local containers_total=$(echo "$pod_ready" | cut -d'/' -f2)
-          if [[ "$containers_ready" == "$containers_total" ]]; then
-            actually_ready=$((actually_ready + 1))
+    # Count pods
+    local total=0 pending=0 creating=0 failed=0 actually_ready=0
+    if [[ -n "$pod_data" ]]; then
+      total=$(echo "$pod_data" | wc -l | tr -d ' ')
+      pending=$(echo "$pod_data" | grep -c "Pending" || true)
+      creating=$(echo "$pod_data" | grep -cE "ContainerCreating|Init|PodInitializing" || true)
+      failed=$(echo "$pod_data" | grep -cE "Error|CrashLoopBackOff|ImagePullBackOff|ErrImagePull" || true)
+      
+      # Count fully ready pods
+      while IFS= read -r line; do
+        if [[ -n "$line" ]]; then
+          local pod_ready=$(echo "$line" | awk '{print $2}')
+          local pod_status=$(echo "$line" | awk '{print $3}')
+          if [[ "$pod_status" == "Running" ]]; then
+            local containers_ready=${pod_ready%/*}
+            local containers_total=${pod_ready#*/}
+            if [[ "$containers_ready" == "$containers_total" ]]; then
+              actually_ready=$((actually_ready + 1))
+            fi
           fi
         fi
-      fi
-    done < <(kubectl get pods -n "$ns" $selector --no-headers 2>/dev/null)
+      done <<< "$pod_data"
+    fi
     
-    status_line+="${actually_ready}/${total} ready"
+    # Count PVCs
+    local pvc_total=0 pvc_bound=0 pvc_pending=0
+    if [[ -n "$pvc_data" ]]; then
+      pvc_total=$(echo "$pvc_data" | wc -l | tr -d ' ')
+      pvc_bound=$(echo "$pvc_data" | grep -c "Bound" || true)
+      pvc_pending=$(echo "$pvc_data" | grep -c "Pending" || true)
+    fi
+    
+    # Build status line
+    local status_line="[${elapsed_min}m${elapsed_sec}s] Pods: ${actually_ready}/${total} ready"
     [[ $creating -gt 0 ]] && status_line+=", ${creating} creating"
     [[ $pending -gt 0 ]] && status_line+=", ${pending} pending"
     [[ $failed -gt 0 ]] && status_line+=", ${failed} FAILED"
@@ -350,7 +355,7 @@ wait_pods_ready() {
       echo ""
       if [[ $pvc_pending -gt 0 ]]; then
         warn "Pending PVCs:"
-        kubectl get pvc -n "$ns" --no-headers 2>/dev/null | grep "Pending" | while read -r line; do
+        echo "$pvc_data" | grep "Pending" | while read -r line; do
           local pvc_name=$(echo "$line" | awk '{print $1}')
           echo "    - $pvc_name"
           kubectl describe pvc "$pvc_name" -n "$ns" 2>/dev/null | grep -A2 "Events:" | tail -2 | sed 's/^/      /'
@@ -358,7 +363,7 @@ wait_pods_ready() {
       fi
       if [[ $failed -gt 0 ]]; then
         warn "Failed pods:"
-        kubectl get pods -n "$ns" $selector --no-headers 2>/dev/null | grep -E "Error|CrashLoopBackOff|ImagePullBackOff" | while read -r line; do
+        echo "$pod_data" | grep -E "Error|CrashLoopBackOff|ImagePullBackOff" | while read -r line; do
           local pod_name=$(echo "$line" | awk '{print $1}')
           local pod_status=$(echo "$line" | awk '{print $3}')
           echo "    - $pod_name ($pod_status)"
