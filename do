@@ -1884,7 +1884,6 @@ provisioner: linstor.csi.linbit.com
 parameters:
   linstor.csi.linbit.com/storagePool: ${POOL_NAME}
   linstor.csi.linbit.com/autoPlace: "${AUTO_PLACE}"
-  linstor.csi.linbit.com/fsck: "false"
   csi.storage.k8s.io/fstype: ext4
 allowVolumeExpansion: true
 reclaimPolicy: Delete
