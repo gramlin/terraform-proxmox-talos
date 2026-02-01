@@ -598,16 +598,34 @@ terraform_plan() {
   info "Plan written to: $PLANFILE"
 }
 
+# Abbreviate long terraform resource names in output for readability
+tf_abbrev() {
+  sed -E \
+    -e 's/null_resource\.cluster_health_checks/health/g' \
+    -e 's/null_resource\.wait_for_api/wait_api/g' \
+    -e 's/null_resource\.bootstrap_talos/bootstrap/g' \
+    -e 's/null_resource\.cluster_config/config/g' \
+    -e 's/null_resource\.talos_upgrade/upgrade/g' \
+    -e 's/null_resource\.apply_config/apply_cfg/g' \
+    -e 's/local_sensitive_file\./file:/g' \
+    -e 's/proxmox_virtual_environment_vm\./vm:/g' \
+    -e 's/talos_machine_configuration_apply\./talos:/g' \
+    -e 's/talos_machine_secrets\./secrets:/g' \
+    -e 's/helm_release\./helm:/g' \
+    -e 's/kubernetes_namespace\./ns:/g' \
+    -e 's/\(local-exec\):/»/g'
+}
+
 terraform_apply() {
   need terraform
   local var_args; var_args="$(terraform_var_file_args)"
   if [[ -f "$PLANFILE" && "${1:-}" == "--use-plan" ]]; then
     step "terraform apply (using planfile)"
-    ( cd "$WORKDIR" && terraform apply -auto-approve "$PLANFILE" )
+    ( cd "$WORKDIR" && terraform apply -auto-approve "$PLANFILE" ) 2>&1 | tf_abbrev
   else
     step "terraform apply"
     # shellcheck disable=SC2086
-    ( cd "$WORKDIR" && terraform apply -auto-approve ${var_args} )
+    ( cd "$WORKDIR" && terraform apply -auto-approve ${var_args} ) 2>&1 | tf_abbrev
   fi
 }
 

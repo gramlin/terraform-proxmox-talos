@@ -67,7 +67,7 @@ if command -v tmux >/dev/null && [[ -z "${TMUX:-}" ]]; then
             info "Starting tmux session with split panes..."
             tmux new-session -d -s deploy -n main \
                 "cd '$SCRIPT_DIR' && ./do $DO_CMD $*; echo ''; echo 'Press Enter to close...'; read"
-            tmux split-window -h -t deploy \
+            tmux split-window -h -p 33 -t deploy \
                 "cd '$SCRIPT_DIR' && .venv/bin/python dashboard.py"
             tmux select-pane -t deploy:0.0
             tmux attach-session -t deploy
