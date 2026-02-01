@@ -451,10 +451,18 @@ class ClusterDashboard:
         step = self._get_step("talos_cfg")
         checkpoints = step.checkpoints
         
-        # Machine secrets
-        secrets_file = os.path.join(self.workdir, "secrets.yaml")
-        if os.path.isfile(secrets_file):
-            checkpoints[0].status = Status.SUCCESS
+        # Machine secrets - check terraform state for talos_machine_secrets
+        tfstate = os.path.join(self.workdir, "terraform.tfstate")
+        if os.path.isfile(tfstate):
+            try:
+                with open(tfstate) as f:
+                    state = json.load(f)
+                    resources = state.get("resources", [])
+                    has_secrets = any("talos_machine_secrets" in r.get("type", "") for r in resources)
+                    if has_secrets:
+                        checkpoints[0].status = Status.SUCCESS
+            except:
+                pass
         
         # Talosconfig
         if os.path.isfile(self.talosconfig):
@@ -488,28 +496,49 @@ class ClusterDashboard:
             data = json.loads(output)
             pods = data.get("items", [])
             
-            components = {
-                "etcd": checkpoints[0],
-                "kube-apiserver": checkpoints[1],
-                "kube-scheduler": checkpoints[2],
-                "kube-controller-manager": checkpoints[3],
-            }
+            # Track which components we've found
+            found = {"etcd": False, "apiserver": False, "scheduler": False, "controller-manager": False}
             
             for pod in pods:
-                name = pod.get("metadata", {}).get("name", "")
+                name = pod.get("metadata", {}).get("name", "").lower()
                 phase = pod.get("status", {}).get("phase", "")
-                for comp, cp in components.items():
-                    if comp in name:
-                        if phase == "Running":
-                            cp.status = Status.SUCCESS
-                        else:
-                            cp.status = Status.WAITING
+                is_running = phase == "Running"
+                
+                # Match specific component names
+                if name.startswith("etcd-") or "etcd" in name:
+                    if is_running:
+                        checkpoints[0].status = Status.SUCCESS
+                        found["etcd"] = True
+                    elif not found["etcd"]:
+                        checkpoints[0].status = Status.WAITING
+                        
+                elif "kube-apiserver" in name:
+                    if is_running:
+                        checkpoints[1].status = Status.SUCCESS
+                        found["apiserver"] = True
+                    elif not found["apiserver"]:
+                        checkpoints[1].status = Status.WAITING
+                        
+                elif "kube-scheduler" in name:
+                    if is_running:
+                        checkpoints[2].status = Status.SUCCESS
+                        found["scheduler"] = True
+                    elif not found["scheduler"]:
+                        checkpoints[2].status = Status.WAITING
+                        
+                elif "kube-controller-manager" in name:
+                    if is_running:
+                        checkpoints[3].status = Status.SUCCESS
+                        found["controller-manager"] = True
+                    elif not found["controller-manager"]:
+                        checkpoints[3].status = Status.WAITING
             
             ready = sum(1 for cp in checkpoints if cp.status == Status.SUCCESS)
             if ready == 4:
                 return Status.SUCCESS, "Control plane up"
             return Status.WAITING, f"{ready}/4 comps"
         except:
+            return Status.WAITING, "Parsing"
             return Status.WAITING, "Parsing"
 
     def _check_nodes(self) -> tuple:
@@ -968,20 +997,17 @@ class ClusterDashboard:
             def is_ready(pod):
                 return pod.get("status", {}).get("phase") == "Running" and all(cs.get("ready", False) for cs in pod.get("status", {}).get("containerStatuses", []))
             
-            components = {
-                "cert-manager-controller": checkpoints[0],  # ctl
-                "cert-manager-webhook": checkpoints[1],      # hook
-                "cert-manager-cainjector": checkpoints[2],   # inj
-            }
-            
+            # Match pods by name pattern
             for pod in pods:
-                name = pod.get("metadata", {}).get("name", "")
-                for comp, cp in components.items():
-                    if comp in name:
-                        if is_ready(pod):
-                            cp.status = Status.SUCCESS
-                        else:
-                            cp.status = Status.WAITING
+                name = pod.get("metadata", {}).get("name", "").lower()
+                ready = is_ready(pod)
+                
+                if "controller" in name or ("cert-manager" in name and "webhook" not in name and "cainjector" not in name):
+                    checkpoints[0].status = Status.SUCCESS if ready else Status.WAITING
+                elif "webhook" in name:
+                    checkpoints[1].status = Status.SUCCESS if ready else Status.WAITING
+                elif "cainjector" in name:
+                    checkpoints[2].status = Status.SUCCESS if ready else Status.WAITING
             
             # Check ClusterIssuer
             issuer_success, issuer_output = self._kubectl(["get", "clusterissuer", "-o", "json"])
@@ -989,17 +1015,20 @@ class ClusterDashboard:
                 try:
                     issuer_data = json.loads(issuer_output)
                     issuers = issuer_data.get("items", [])
-                    ready = sum(1 for iss in issuers if any(c.get("type") == "Ready" and c.get("status") == "True" for c in iss.get("status", {}).get("conditions", [])))
-                    if ready > 0:
+                    ready_issuers = sum(1 for iss in issuers if any(c.get("type") == "Ready" and c.get("status") == "True" for c in iss.get("status", {}).get("conditions", [])))
+                    if ready_issuers > 0:
                         checkpoints[3].status = Status.SUCCESS
-                        checkpoints[3].message = f"{ready}"
+                        checkpoints[3].message = f"{ready_issuers}"
+                    elif issuers:
+                        checkpoints[3].status = Status.WAITING
                 except:
                     pass
             
-            running = sum(1 for p in pods if is_ready(p))
-            if running == len(pods) and checkpoints[3].status == Status.SUCCESS:
-                return Status.SUCCESS, f"{running} pods"
-            return Status.WAITING, f"{running}/{len(pods)}"
+            done = sum(1 for cp in checkpoints if cp.status == Status.SUCCESS)
+            total = len(checkpoints)
+            if done == total:
+                return Status.SUCCESS, f"{done}/{total}"
+            return Status.WAITING, f"{done}/{total}"
         except:
             return Status.FAILED, "Error"
 
