@@ -48,6 +48,86 @@ BG_COLOR = "#D9D7B6"
 BG_STYLE = Style(bgcolor=BG_COLOR)
 TEXT_COLOR = "#000000"
 
+# ╔══════════════════════════════════════════════════════════════════╗
+# ║  ACHTUNG! ALLES LOOKENSPEEPERS!                                  ║
+# ║  DAS BLINKENLICHTEN IST ACTIVE!                                  ║
+# ║  KEEPENHANSEN DAS COTTONPICKERS MITTS IN DAS POCKETS!           ║
+# ╚══════════════════════════════════════════════════════════════════╝
+
+# Spinner frames
+SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+BLINK_FRAMES = ["◐", "◓", "◑", "◒"]
+
+# BLINKENLIGHTS! More animations!
+PULSE_FRAMES = ["○", "◔", "◑", "◕", "●", "◕", "◑", "◔"]
+WAVE_FRAMES = ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█", "▇", "▆", "▅", "▄", "▃", "▂"]
+RADAR_FRAMES = ["◜ ", " ◝", " ◞", "◟ "]
+DOTS_FRAMES = ["⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷"]
+CLOCK_FRAMES = ["🕐", "🕑", "🕒", "🕓", "🕔", "🕕", "🕖", "🕗", "🕘", "🕙", "🕚", "🕛"]
+BOUNCE_FRAMES = ["⠁", "⠂", "⠄", "⠂"]
+ARROW_FRAMES = ["←", "↖", "↑", "↗", "→", "↘", "↓", "↙"]
+METER_FRAMES = ["▰▱▱▱▱", "▰▰▱▱▱", "▰▰▰▱▱", "▰▰▰▰▱", "▰▰▰▰▰"]
+HEART_FRAMES = ["💗", "💖", "💝", "💘"]
+FIRE_FRAMES = ["🔥", "🔥", "💥", "✨"]
+LIGHTNING_FRAMES = ["⚡", "✨", "⚡", "💫"]
+NETWORK_FRAMES = ["◠", "◡", "◠", "◡"]
+DISK_FRAMES = ["◴", "◷", "◶", "◵"]
+SERVER_FRAMES = ["▣", "▤", "▥", "▦"]
+EARTH_FRAMES = ["🌍", "🌎", "🌏", "🌎"]
+ROCKET_FRAMES = ["🚀", "🚀", "💨", "🚀"]
+
+# LED colors for blinkenlights panel
+LED_COLORS = ["#FF3333", "#33FF33", "#3366FF", "#FFAA33", "#FF33FF", "#33FFFF", "#FFFF33", "#FF6633"]
+LED_DIM = "#444444"
+
+# Celebration ASCII art frames for deployment completion!
+CELEBRATION_FRAMES = [
+    r"""
+    ★ ☆ ★ ☆ ★ ☆ ★ ☆ ★ ☆ ★ ☆ ★ ☆ ★ ☆ ★ ☆ ★
+    ╔═══════════════════════════════════════╗
+    ║   ██████╗██╗     ██╗   ██╗███████╗   ║
+    ║  ██╔════╝██║     ██║   ██║██╔════╝   ║
+    ║  ██║     ██║     ██║   ██║███████╗   ║
+    ║  ██║     ██║     ██║   ██║╚════██║   ║
+    ║  ╚██████╗███████╗╚██████╔╝███████║   ║
+    ║   ╚═════╝╚══════╝ ╚═════╝ ╚══════╝   ║
+    ║       T E R   R E A D Y ! ! !         ║
+    ╚═══════════════════════════════════════╝
+    ☆ ★ ☆ ★ ☆ ★ ☆ ★ ☆ ★ ☆ ★ ☆ ★ ☆ ★ ☆ ★ ☆
+    """,
+    r"""
+    ☆ ★ ☆ ★ ☆ ★ ☆ ★ ☆ ★ ☆ ★ ☆ ★ ☆ ★ ☆ ★ ☆
+    ╔═══════════════════════════════════════╗
+    ║   ██████╗██╗     ██╗   ██╗███████╗   ║
+    ║  ██╔════╝██║     ██║   ██║██╔════╝   ║
+    ║  ██║     ██║     ██║   ██║███████╗   ║
+    ║  ██║     ██║     ██║   ██║╚════██║   ║
+    ║  ╚██████╗███████╗╚██████╔╝███████║   ║
+    ║   ╚═════╝╚══════╝ ╚═════╝ ╚══════╝   ║
+    ║       T E R   R E A D Y ! ! !         ║
+    ╚═══════════════════════════════════════╝
+    ★ ☆ ★ ☆ ★ ☆ ★ ☆ ★ ☆ ★ ☆ ★ ☆ ★ ☆ ★ ☆ ★
+    """
+]
+
+# Fireworks frames
+FIREWORK_FRAMES = [
+    ["    ", "  * ", " \\|/", "  |  "],
+    ["  * ", " *|* ", " /|\\ ", "  |  "],
+    [" \\|/ ", " -*-*-", " /|\\|/\\", "  |  "],
+    ["*-*-*", "*\\|/*", "-*-*-", " /|\\"]
+]
+
+# Activity symbols
+ACTIVITY_ON = "●"
+ACTIVITY_OFF = "○"
+
+# Box drawing for retro look
+BOX_CHARS = {
+    "tl": "╔", "tr": "╗", "bl": "╚", "br": "╝",
+    "h": "═", "v": "║", "cross": "╬"
+}
+
 
 class Status(Enum):
     PENDING = "pending"
@@ -103,9 +183,13 @@ class ClusterDashboard:
         self.workdir = workdir
         self.kubeconfig = self._find_kubeconfig()
         self.talosconfig = os.path.join(workdir, "talosconfig.yml")
+        self.test_results_file = os.path.join(workdir, ".test-results.json")
         self.steps: List[Step] = []
+        self.test_results: dict = {}
         self.lock = threading.Lock()
         self.frame = 0  # Animation frame counter
+        self.start_time = time.time()  # Track uptime
+        self.completion_frame = None  # When did we complete?
         self._init_steps()
 
     def _find_kubeconfig(self) -> str:
@@ -161,9 +245,18 @@ class ClusterDashboard:
             Step("traefik", "Traefik",
                  check_fn=self._check_traefik,
                  checkpoints=[Checkpoint("dep"), Checkpoint("LB"), Checkpoint("rdy")]),
+            Step("certmgr", "CertMgr",
+                 check_fn=self._check_certmanager,
+                 checkpoints=[Checkpoint("ctl"), Checkpoint("hook"), Checkpoint("inj"), Checkpoint("issu")]),
+            Step("monitoring", "Monitor",
+                 check_fn=self._check_monitoring,
+                 checkpoints=[Checkpoint("prom"), Checkpoint("graf"), Checkpoint("alert"), Checkpoint("node"), Checkpoint("kube")]),
             Step("harbor", "Harbor",
                  check_fn=self._check_harbor,
                  checkpoints=[Checkpoint("pvc"), Checkpoint("db"), Checkpoint("red"), Checkpoint("core"), Checkpoint("reg"), Checkpoint("job"), Checkpoint("tri")]),
+            Step("gitea", "Gitea",
+                 check_fn=self._check_gitea,
+                 checkpoints=[Checkpoint("pvc"), Checkpoint("db"), Checkpoint("app"), Checkpoint("ing")]),
             Step("ingress", "Ingress",
                  check_fn=self._check_ingress,
                  checkpoints=[Checkpoint("cert"), Checkpoint("issuer"), Checkpoint("ing")]),
@@ -789,6 +882,182 @@ class ClusterDashboard:
         except:
             return Status.FAILED, "Error"
 
+    def _check_certmanager(self) -> tuple:
+        """Check cert-manager components"""
+        step = self._get_step("certmgr")
+        checkpoints = step.checkpoints
+        
+        success, output = self._kubectl(["get", "pods", "-n", "cert-manager", "-o", "json"])
+        if not success:
+            return Status.PENDING, "Not installed"
+        
+        try:
+            data = json.loads(output)
+            pods = data.get("items", [])
+            if not pods:
+                return Status.PENDING, "Not installed"
+            
+            def is_ready(pod):
+                return pod.get("status", {}).get("phase") == "Running" and all(cs.get("ready", False) for cs in pod.get("status", {}).get("containerStatuses", []))
+            
+            components = {
+                "cert-manager-controller": checkpoints[0],  # ctl
+                "cert-manager-webhook": checkpoints[1],      # hook
+                "cert-manager-cainjector": checkpoints[2],   # inj
+            }
+            
+            for pod in pods:
+                name = pod.get("metadata", {}).get("name", "")
+                for comp, cp in components.items():
+                    if comp in name:
+                        if is_ready(pod):
+                            cp.status = Status.SUCCESS
+                        else:
+                            cp.status = Status.WAITING
+            
+            # Check ClusterIssuer
+            issuer_success, issuer_output = self._kubectl(["get", "clusterissuer", "-o", "json"])
+            if issuer_success:
+                try:
+                    issuer_data = json.loads(issuer_output)
+                    issuers = issuer_data.get("items", [])
+                    ready = sum(1 for iss in issuers if any(c.get("type") == "Ready" and c.get("status") == "True" for c in iss.get("status", {}).get("conditions", [])))
+                    if ready > 0:
+                        checkpoints[3].status = Status.SUCCESS
+                        checkpoints[3].message = f"{ready}"
+                except:
+                    pass
+            
+            running = sum(1 for p in pods if is_ready(p))
+            if running == len(pods) and checkpoints[3].status == Status.SUCCESS:
+                return Status.SUCCESS, f"{running} pods"
+            return Status.WAITING, f"{running}/{len(pods)}"
+        except:
+            return Status.FAILED, "Error"
+
+    def _check_monitoring(self) -> tuple:
+        """Check Prometheus/Grafana monitoring stack"""
+        step = self._get_step("monitoring")
+        checkpoints = step.checkpoints
+        
+        # Try common monitoring namespaces
+        namespaces = ["monitoring", "prometheus", "observability", "kube-prometheus-stack"]
+        ns_found = None
+        
+        for ns in namespaces:
+            success, output = self._kubectl(["get", "pods", "-n", ns, "-o", "json"])
+            if success:
+                try:
+                    data = json.loads(output)
+                    if data.get("items"):
+                        ns_found = ns
+                        break
+                except:
+                    pass
+        
+        if not ns_found:
+            return Status.PENDING, "Not installed"
+        
+        success, output = self._kubectl(["get", "pods", "-n", ns_found, "-o", "json"])
+        try:
+            data = json.loads(output)
+            pods = data.get("items", [])
+            
+            def is_ready(pod):
+                return pod.get("status", {}).get("phase") == "Running" and all(cs.get("ready", False) for cs in pod.get("status", {}).get("containerStatuses", []))
+            
+            components = {
+                "prometheus": checkpoints[0],    # prom
+                "grafana": checkpoints[1],       # graf
+                "alertmanager": checkpoints[2],  # alert
+                "node-exporter": checkpoints[3], # node
+                "kube-state": checkpoints[4],    # kube
+            }
+            
+            for pod in pods:
+                name = pod.get("metadata", {}).get("name", "").lower()
+                for comp, cp in components.items():
+                    if comp in name:
+                        if is_ready(pod):
+                            cp.status = Status.SUCCESS
+                        elif pod.get("status", {}).get("phase") == "Running":
+                            cp.status = Status.WAITING
+                        elif pod.get("status", {}).get("phase") == "Pending":
+                            cp.status = Status.WAITING
+            
+            running = sum(1 for p in pods if is_ready(p))
+            total = len(pods)
+            
+            if running == total and total > 0:
+                return Status.SUCCESS, f"All {total} ready"
+            return Status.WAITING, f"{running}/{total}"
+        except:
+            return Status.FAILED, "Error"
+
+    def _check_gitea(self) -> tuple:
+        """Check Gitea git server"""
+        step = self._get_step("gitea")
+        checkpoints = step.checkpoints
+        
+        # Check PVCs
+        pvc_success, pvc_output = self._kubectl(["get", "pvc", "-n", "gitea", "-o", "json"])
+        if pvc_success:
+            try:
+                pvc_data = json.loads(pvc_output)
+                pvcs = pvc_data.get("items", [])
+                bound = sum(1 for p in pvcs if p.get("status", {}).get("phase") == "Bound")
+                if pvcs:
+                    checkpoints[0].status = Status.SUCCESS if bound == len(pvcs) else Status.WAITING
+                    checkpoints[0].message = f"{bound}/{len(pvcs)}"
+            except:
+                pass
+        
+        success, output = self._kubectl(["get", "pods", "-n", "gitea", "-o", "json"])
+        if not success:
+            return Status.PENDING, "Not installed"
+        
+        try:
+            data = json.loads(output)
+            pods = data.get("items", [])
+            if not pods:
+                return Status.PENDING, "Not installed"
+            
+            def is_ready(pod):
+                return pod.get("status", {}).get("phase") == "Running" and all(cs.get("ready", False) for cs in pod.get("status", {}).get("containerStatuses", []))
+            
+            for pod in pods:
+                name = pod.get("metadata", {}).get("name", "").lower()
+                if "postgresql" in name or "postgres" in name:
+                    if is_ready(pod):
+                        checkpoints[1].status = Status.SUCCESS
+                    else:
+                        checkpoints[1].status = Status.WAITING
+                elif "gitea" in name and "postgresql" not in name:
+                    if is_ready(pod):
+                        checkpoints[2].status = Status.SUCCESS
+                    else:
+                        checkpoints[2].status = Status.WAITING
+            
+            # Check ingress
+            ing_success, ing_output = self._kubectl(["get", "ingress", "-n", "gitea", "-o", "json"])
+            if ing_success:
+                try:
+                    ing_data = json.loads(ing_output)
+                    ingresses = ing_data.get("items", [])
+                    if ingresses:
+                        checkpoints[3].status = Status.SUCCESS
+                except:
+                    pass
+            
+            running = sum(1 for p in pods if is_ready(p))
+            total = len(pods)
+            
+            if running == total and total > 0:
+                return Status.SUCCESS, f"All {total} ready"
+            return Status.WAITING, f"{running}/{total}"
+        except:
+            return Status.FAILED, "Error"
+
     def _check_ingress(self) -> tuple:
         """Check ingress and cert-manager"""
         step = self._get_step("ingress")
@@ -843,6 +1112,16 @@ class ClusterDashboard:
             return Status.WAITING, f"{done}/3"
         return Status.PENDING, "Checking"
 
+    def _load_test_results(self) -> dict:
+        """Load test results from JSON file"""
+        if not os.path.isfile(self.test_results_file):
+            return {}
+        try:
+            with open(self.test_results_file) as f:
+                return json.load(f)
+        except:
+            return {}
+
     def _get_pvcs(self) -> List[dict]:
         success, output = self._kubectl(["get", "pvc", "-n", "harbor", "-o", "json"])
         if not success:
@@ -859,9 +1138,20 @@ class ClusterDashboard:
             if i > 0:
                 text.append(" ")
             if cp.status == Status.WAITING:
-                # Animated spinner for waiting checkpoints
-                icon = BLINK_FRAMES[(self.frame + i) % len(BLINK_FRAMES)]
+                # Animated spinner for waiting checkpoints - use different animations!
+                anim_type = i % 3
+                if anim_type == 0:
+                    icon = BLINK_FRAMES[(self.frame + i) % len(BLINK_FRAMES)]
+                elif anim_type == 1:
+                    icon = PULSE_FRAMES[(self.frame + i) % len(PULSE_FRAMES)]
+                else:
+                    icon = RADAR_FRAMES[(self.frame + i) % len(RADAR_FRAMES)]
                 text.append(icon, style="#0066AA bold")
+            elif cp.status == Status.SUCCESS:
+                # Subtle pulse for completed items
+                phase = (self.frame + i * 3) % 8
+                brightness = "33FF33" if phase < 4 else "22DD22"
+                text.append("■", style=f"#{brightness}")
             else:
                 icon, style = CHECKPOINT_STYLES.get(cp.status, ("○", "#666666"))
                 text.append(icon, style=style)
@@ -870,8 +1160,29 @@ class ClusterDashboard:
     def render_step_icon(self, step: Step) -> Text:
         """Render step icon with animation for waiting states"""
         if step.status == Status.WAITING:
-            icon = SPINNER_FRAMES[self.frame % len(SPINNER_FRAMES)]
+            # Use different spinners based on step index
+            idx = self.steps.index(step) if step in self.steps else 0
+            anim_type = idx % 4
+            if anim_type == 0:
+                icon = SPINNER_FRAMES[self.frame % len(SPINNER_FRAMES)]
+            elif anim_type == 1:
+                icon = DOTS_FRAMES[self.frame % len(DOTS_FRAMES)]
+            elif anim_type == 2:
+                icon = RADAR_FRAMES[self.frame % len(RADAR_FRAMES)]
+            else:
+                icon = BOUNCE_FRAMES[self.frame % len(BOUNCE_FRAMES)]
             return Text(icon, style="#0066AA bold")
+        elif step.status == Status.SUCCESS:
+            # Subtle celebration animation
+            if self.frame % 20 < 2:
+                return Text("★", style="#FFD700 bold")
+            return Text("●", style="#33FF33 bold")
+        elif step.status == Status.FAILED:
+            # Alarming blink
+            if self.frame % 4 < 2:
+                return Text("●", style="#FF0000 bold")
+            else:
+                return Text("○", style="#880000")
         icon, style = STATUS_ICONS[step.status]
         return Text(icon, style=style)
 
@@ -911,6 +1222,378 @@ class ClusterDashboard:
             table.add_row(Text(pvc["name"][:22], style="#000000"), Text(st[:6], style=style), pvc["size"][:5])
         return table
 
+    def render_blinkenlights(self) -> Text:
+        """DAS BLINKENLICHTEN! Render animated status LEDs with MAXIMUM BELLS AND WHISTLES"""
+        text = Text()
+        all_done = all(s.status == Status.SUCCESS for s in self.steps)
+        
+        # Header with animated border
+        border_char = "═" if self.frame % 4 < 2 else "─"
+        text.append(f"╔{border_char*43}╗\n", style="#444444")
+        text.append("║", style="#444444")
+        
+        # Animated title
+        if all_done:
+            title = "  ALL SYSTEMS NOMINAL! MISSION SUCCESS!  "
+            for i, char in enumerate(title):
+                colors = ["#00FF00", "#00DD00", "#00BB00", "#00FF00"]
+                color = colors[(self.frame + i) % len(colors)]
+                text.append(char, style=f"bold {color}")
+        else:
+            title = "  ACHTUNG! DAS BLINKENLICHTEN!  "
+            for i, char in enumerate(title):
+                phase = (self.frame + i * 2) % 20
+                if phase < 10:
+                    text.append(char, style="bold #000000")
+                else:
+                    text.append(char, style="bold #333333")
+        
+        text.append("║\n", style="#444444")
+        text.append("╠═══════════════════════════════════════════╣\n", style="#444444")
+        
+        # Scrolling status message
+        text.append("║ ", style="#444444")
+        active_step = next((s for s in self.steps if s.status == Status.WAITING), None)
+        if all_done:
+            message = "★ CLUSTER READY ★ ALL COMPONENTS DEPLOYED ★ TESTS COMPLETE ★ "
+        elif active_step:
+            message = f">>> {active_step.name.upper()}: {active_step.message or 'Processing...'} <<< "
+        else:
+            message = ">>> INITIALIZING CLUSTER DEPLOYMENT <<< "
+        
+        # Scroll the message
+        display_width = 39
+        scroll_offset = self.frame % len(message)
+        scrolled = (message * 3)[scroll_offset:scroll_offset + display_width]
+        text.append(scrolled, style="#00AAFF bold")
+        text.append("  ║\n", style="#444444")
+        
+        text.append("╠═══════════════════════════════════════════╣\n", style="#444444")
+        
+        # System status LEDs row 1
+        text.append("║ ", style="#444444")
+        text.append("SYS ", style="#000000 dim")
+        
+        # Animated system LEDs based on step status
+        led_states = []
+        for i, step in enumerate(self.steps[:8]):
+            if step.status == Status.SUCCESS:
+                led_states.append(("#33FF33", True))
+            elif step.status == Status.WAITING:
+                # Blink!
+                on = (self.frame + i) % 4 < 2
+                led_states.append(("#FFAA33" if on else LED_DIM, on))
+            elif step.status == Status.FAILED:
+                on = self.frame % 2 == 0
+                led_states.append(("#FF3333" if on else "#880000", True))
+            else:
+                led_states.append((LED_DIM, False))
+        
+        for color, _ in led_states:
+            text.append("●", style=color)
+            text.append(" ", style="#444444")
+        
+        text.append("  ║\n", style="#444444")
+        
+        # Network activity row
+        text.append("║ ", style="#444444")
+        text.append("NET ", style="#000000 dim")
+        
+        # Network activity animation
+        net_active = any(s.status == Status.WAITING for s in self.steps)
+        for i in range(8):
+            if net_active:
+                phase = (self.frame + i * 2) % 16
+                if phase < 8:
+                    intensity = phase / 8
+                else:
+                    intensity = (16 - phase) / 8
+                color = f"#{int(51 + 204*intensity):02x}{int(102 + 153*intensity):02x}FF"
+                text.append("●", style=color)
+            else:
+                text.append("○", style=LED_DIM)
+            text.append(" ", style="#444444")
+        text.append("  ║\n", style="#444444")
+        
+        # Storage activity row
+        text.append("║ ", style="#444444")
+        text.append("I/O ", style="#000000 dim")
+        
+        storage_steps = [s for s in self.steps if "stor" in s.name.lower() or "linstor" in s.name.lower() or "pvc" in s.name.lower()]
+        storage_active = any(s.status == Status.WAITING for s in storage_steps)
+        
+        for i in range(8):
+            if storage_active:
+                on = (self.frame + i * 3) % 6 < 3
+                text.append("●" if on else "○", style="#FF6633" if on else LED_DIM)
+            else:
+                has_storage = i < len([s for s in self.steps if s.name in ["storage", "satellites", "linstor", "sc"] and s.status == Status.SUCCESS])
+                text.append("●" if has_storage else "○", style="#33FF33" if has_storage else LED_DIM)
+            text.append(" ", style="#444444")
+        text.append("  ║\n", style="#444444")
+        
+        # CPU activity (fake but fun)
+        text.append("║ ", style="#444444")
+        text.append("CPU ", style="#000000 dim")
+        
+        for i in range(8):
+            # Random-ish blinking based on frame
+            val = ((self.frame * 7 + i * 13) % 100)
+            if val < 30:
+                text.append("●", style="#33FF33")
+            elif val < 60:
+                text.append("●", style="#FFFF33")
+            elif val < 80:
+                text.append("●", style="#FF6633")
+            else:
+                text.append("○", style=LED_DIM)
+            text.append(" ", style="#444444")
+        text.append("  ║\n", style="#444444")
+        
+        # Memory bar
+        text.append("║ ", style="#444444")
+        text.append("MEM ", style="#000000 dim")
+        
+        completed = sum(1 for s in self.steps if s.status == Status.SUCCESS)
+        total = len(self.steps)
+        fill = int((completed / total) * 8) if total > 0 else 0
+        
+        for i in range(8):
+            if i < fill:
+                text.append("█", style="#33FF33")
+            elif i == fill and self.frame % 4 < 2:
+                text.append("▓", style="#FFAA33")
+            else:
+                text.append("░", style=LED_DIM)
+            text.append(" ", style="#444444")
+        text.append("  ║\n", style="#444444")
+        
+        text.append("╠═══════════════════════════════════════════╣\n", style="#444444")
+        
+        # Activity indicators with animations
+        text.append("║ ", style="#444444")
+        
+        # Kubernetes
+        k8s_ok = any(s.status == Status.SUCCESS for s in self.steps if "node" in s.name.lower())
+        k8s_icon = "☸" if k8s_ok else DOTS_FRAMES[self.frame % len(DOTS_FRAMES)]
+        text.append(f" {k8s_icon} ", style="#326CE5" if k8s_ok else "#FFAA33")
+        
+        # Network
+        net_ok = any(s.status == Status.SUCCESS for s in self.steps if "cilium" in s.name.lower())
+        net_icon = NETWORK_FRAMES[self.frame % len(NETWORK_FRAMES)]
+        text.append(f" {net_icon} ", style="#33FF33" if net_ok else "#FFAA33")
+        
+        # Storage
+        stor_ok = any(s.status == Status.SUCCESS for s in self.steps if "storage" in s.name.lower())
+        disk_icon = DISK_FRAMES[self.frame % len(DISK_FRAMES)]
+        text.append(f" {disk_icon} ", style="#33FF33" if stor_ok else "#FFAA33")
+        
+        # Server
+        srv_icon = SERVER_FRAMES[self.frame % len(SERVER_FRAMES)]
+        text.append(f" {srv_icon} ", style="#33FF33")
+        
+        # Earth (connectivity)
+        earth_icon = EARTH_FRAMES[self.frame % len(EARTH_FRAMES)]
+        text.append(f" {earth_icon} ", style="#33FF33")
+        
+        # Rocket (progress)
+        if completed < total:
+            rocket_icon = ROCKET_FRAMES[self.frame % len(ROCKET_FRAMES)]
+            text.append(f" {rocket_icon}", style="#FF6633")
+        else:
+            text.append(" ✅", style="#33FF33")
+        
+        text.append("    ║\n", style="#444444")
+        
+        # Wave animation bar
+        text.append("║ ", style="#444444")
+        wave_width = 41
+        for i in range(wave_width):
+            wave_char = WAVE_FRAMES[(self.frame + i) % len(WAVE_FRAMES)]
+            # Color gradient
+            hue = (self.frame * 5 + i * 8) % 360
+            if hue < 60:
+                color = "#FF3333"
+            elif hue < 120:
+                color = "#FFAA33"
+            elif hue < 180:
+                color = "#33FF33"
+            elif hue < 240:
+                color = "#33FFFF"
+            elif hue < 300:
+                color = "#3366FF"
+            else:
+                color = "#FF33FF"
+            text.append(wave_char, style=color)
+        text.append(" ║\n", style="#444444")
+        
+        text.append("╚═══════════════════════════════════════════╝", style="#444444")
+        
+        return text
+
+    def render_celebration(self) -> Text:
+        """Render a celebration when deployment completes!"""
+        text = Text()
+        all_done = all(s.status == Status.SUCCESS for s in self.steps)
+        
+        if not all_done:
+            return text
+        
+        # Time since completion
+        celebration_duration = self.frame - (self.completion_frame or self.frame)
+        
+        # Celebration colors
+        colors = ["#FF3333", "#FF7F00", "#FFFF00", "#00FF00", "#00FFFF", "#0000FF", "#8B00FF"]
+        
+        # Fireworks!
+        firework_chars = ["✦", "✧", "✶", "✷", "✸", "✹", "★", "☆", "✵", "✴"]
+        
+        lines = []
+        
+        # Banner line 1 - stars
+        line1 = ""
+        for i in range(50):
+            if (self.frame + i) % 5 == 0:
+                line1 += firework_chars[(self.frame + i) % len(firework_chars)]
+            else:
+                line1 += " "
+        text.append(f"{line1}\n")
+        
+        # Apply rainbow colors to banner
+        banner_text = " 🎉  DEPLOYMENT COMPLETE!  🎉 "
+        for i, char in enumerate(banner_text):
+            color = colors[(self.frame + i) % len(colors)]
+            text.append(char, style=f"bold {color} on {BG_COLOR}")
+        text.append("\n")
+        
+        # Stats line
+        elapsed = int(time.time() - self.start_time)
+        mins, secs = divmod(elapsed, 60)
+        text.append(f"     Time: {mins}m {secs}s", style="bold #000000")
+        
+        # Test results if available
+        results = self._load_test_results()
+        if results and results.get("tests"):
+            passed = results.get("passed", 0)
+            total = passed + results.get("failed", 0)
+            text.append(f"  │  Tests: {passed}/{total} ✓", style="bold #008800" if results.get("failed", 0) == 0 else "bold #CC0000")
+        
+        text.append("\n")
+        
+        # Fireworks line 2
+        line2 = ""
+        for i in range(50):
+            if (self.frame + i + 3) % 7 == 0:
+                line2 += firework_chars[(self.frame + i * 2) % len(firework_chars)]
+            else:
+                line2 += " "
+        
+        for i, char in enumerate(line2):
+            if char != " ":
+                color = colors[(self.frame + i) % len(colors)]
+                text.append(char, style=color)
+            else:
+                text.append(char)
+        
+        return text
+
+    def render_test_cards(self) -> Table:
+        """Render test results as cards with BLINKENLIGHTS"""
+        results = self._load_test_results()
+        
+        if not results or not results.get("tests"):
+            table = Table(title="🧪 Tests", show_header=False, border_style="#444444", box=None, title_style="#000000")
+            table.add_column("", width=40)
+            status = results.get("status", "pending")
+            if status == "running":
+                # Animated waiting
+                spinner = DOTS_FRAMES[self.frame % len(DOTS_FRAMES)]
+                meter = METER_FRAMES[self.frame % len(METER_FRAMES)]
+                table.add_row(Text(f"{spinner} Tests running... {meter}", style="#0066AA"))
+            else:
+                table.add_row(Text("○ No tests yet - awaiting deployment", style="#666666"))
+            return table
+        
+        # Group tests by category
+        categories = {}
+        for test in results.get("tests", []):
+            cat = test.get("category", "other")
+            if cat not in categories:
+                categories[cat] = []
+            categories[cat].append(test)
+        
+        table = Table(title="🧪 Tests", show_header=False, border_style="#444444", box=None, title_style="#000000", expand=True)
+        table.add_column("", width=8, style="#000000")
+        table.add_column("", width=18, style="#000000")
+        table.add_column("", width=2)
+        table.add_column("", width=15, style="#444444")
+        
+        # Category icons
+        cat_icons = {
+            "basic": "🔧",
+            "talos": "🖥️",
+            "network": "🌐",
+            "storage": "💾",
+            "apps": "📦",
+        }
+        
+        for cat, tests in categories.items():
+            icon = cat_icons.get(cat, "•")
+            for i, test in enumerate(tests):
+                status = test.get("status", "")
+                name = test.get("name", "?")[:18]
+                msg = test.get("message", "")[:15]
+                
+                if status == "pass":
+                    # Animated success - subtle pulse
+                    phase = (self.frame + i * 2) % 8
+                    if phase < 2:
+                        st_icon = "★"
+                        st_style = "#FFD700"
+                    else:
+                        st_icon = "✓"
+                        st_style = "#33FF33"
+                elif status == "fail":
+                    # Alarming blink for failures
+                    if self.frame % 4 < 2:
+                        st_icon = "✗"
+                        st_style = "#FF0000 bold"
+                    else:
+                        st_icon = "!"
+                        st_style = "#FF6600"
+                elif status == "skip":
+                    st_icon = "○"
+                    st_style = "#666666"
+                    st_icon = "○"
+                    st_style = "#666666"
+                else:
+                    st_icon = "?"
+                    st_style = "#666666"
+                
+                table.add_row(
+                    Text(f"{icon} {cat[:5]}", style="#444444"),
+                    Text(name, style="#000000"),
+                    Text(st_icon, style=st_style),
+                    Text(msg, style="#444444")
+                )
+        
+        # Summary
+        passed = results.get("passed", 0)
+        failed = results.get("failed", 0)
+        total = passed + failed
+        
+        if total > 0:
+            table.add_row("", "", "", "")
+            summary_style = "#008800" if failed == 0 else "#CC0000"
+            table.add_row(
+                Text("", style="#444444"),
+                Text(f"Total: {passed}/{total}", style=summary_style),
+                Text("✓" if failed == 0 else "!", style=summary_style),
+                Text("PASSED" if failed == 0 else f"{failed} FAIL", style=summary_style)
+            )
+        
+        return table
+
     def render_progress_bar(self) -> Text:
         """Render a visual progress bar based on completed steps"""
         total = len(self.steps)
@@ -929,28 +1612,128 @@ class ClusterDashboard:
         bar.append(f" {done}/{total}", style="bold #000000")
         return bar
 
+    def render_header_fancy(self) -> Text:
+        """Render an animated header with MAXIMUM BLINKENLIGHTS"""
+        text = Text()
+        
+        # Check if all complete
+        all_done = all(s.status == Status.SUCCESS for s in self.steps)
+        if all_done and self.completion_frame is None:
+            self.completion_frame = self.frame
+        
+        # Celebration mode!
+        if all_done:
+            celebration_icons = ["🎉", "🎊", "✨", "🌟", "🏆", "🚀", "💫", "⭐"]
+            icon = celebration_icons[self.frame % len(celebration_icons)]
+            text.append(f" {icon} ", style="bold")
+        else:
+            # Animated rocket
+            rocket = ROCKET_FRAMES[self.frame % len(ROCKET_FRAMES)]
+            text.append(f" {rocket} ", style="bold")
+        
+        # Title with rainbow animation when complete
+        title = "TALOS CLUSTER DASHBOARD"
+        if all_done:
+            # Rainbow celebration!
+            colors = ["#FF0000", "#FF7F00", "#FFFF00", "#00FF00", "#0000FF", "#4B0082", "#9400D3"]
+            for i, char in enumerate(title):
+                color = colors[(self.frame + i) % len(colors)]
+                text.append(char, style=f"bold {color} on {BG_COLOR}")
+        else:
+            # Normal with subtle wave
+            for i, char in enumerate(title):
+                phase = (self.frame + i) % 20
+                if phase < 5:
+                    text.append(char, style=f"bold #000000 on {BG_COLOR}")
+                else:
+                    text.append(char, style=f"bold #222222 on {BG_COLOR}")
+        
+        text.append("  │  ", style="#444444")
+        text.append_text(self.render_progress_bar())
+        
+        # Uptime counter
+        elapsed = int(time.time() - self.start_time)
+        mins, secs = divmod(elapsed, 60)
+        text.append("  ⏱ ", style="#444444")
+        text.append(f"{mins:02d}:{secs:02d}", style="#000000 bold")
+        
+        # Animated clock
+        clock = CLOCK_FRAMES[self.frame % len(CLOCK_FRAMES)]
+        text.append(f"  {clock} ", style="#444444")
+        text.append(time.strftime('%H:%M:%S'), style="#000000")
+        
+        # Activity indicator
+        if all_done:
+            # Celebration sparkles
+            sparkles = ["✨", "💫", "⭐", "🌟"]
+            text.append(f"  {sparkles[self.frame % len(sparkles)]}", style="#FFD700")
+        elif any(s.status == Status.WAITING for s in self.steps):
+            activity = DOTS_FRAMES[self.frame % len(DOTS_FRAMES)]
+            text.append(f"  {activity}", style="#FFAA33")
+        else:
+            text.append("  ●", style="#33FF33")
+        
+        return text
+
     def render_layout(self) -> Layout:
+        all_done = all(s.status == Status.SUCCESS for s in self.steps)
+        
         layout = Layout()
-        layout.split_column(Layout(name="header", size=3), Layout(name="main"), Layout(name="footer", size=3))
-        layout["main"].split_row(Layout(name="left", ratio=3), Layout(name="right", ratio=2))
-        layout["right"].split_column(Layout(name="details"), Layout(name="pvcs"))
-        header = Text()
-        header.append("🚀 ", style="bold")
-        header.append("Talos Cluster Dashboard", style=f"bold #000000 on {BG_COLOR}")
-        header.append("  │  ", style="#444444")
-        header.append_text(self.render_progress_bar())
-        header.append(f"  │  {os.path.basename(self.kubeconfig)}", style="#444444")
-        layout["header"].update(Panel(header, border_style="#444444", style=BG_STYLE))
-        layout["left"].update(Panel(self.render_step_table(), title="Steps", border_style="#444444", style=BG_STYLE))
-        layout["details"].update(Panel(self.render_checkpoint_details(), title="Active Checks", border_style="#444444", style=BG_STYLE))
+        
+        if all_done:
+            # CELEBRATION MODE! 🎉
+            layout.split_column(
+                Layout(name="header", size=3),
+                Layout(name="celebration", size=5),
+                Layout(name="main"),
+                Layout(name="blinken", size=12),
+                Layout(name="footer", size=3)
+            )
+            layout["celebration"].update(Panel(self.render_celebration(), border_style="#FFD700", style=BG_STYLE, title="🏆 VICTORY", title_align="center"))
+        else:
+            layout.split_column(
+                Layout(name="header", size=3),
+                Layout(name="main"),
+                Layout(name="blinken", size=12),
+                Layout(name="footer", size=3)
+            )
+        
+        # Main area: steps on left, tests + pvcs on right
+        layout["main"].split_row(Layout(name="left", ratio=2), Layout(name="right", ratio=3))
+        layout["left"].split_column(Layout(name="steps", ratio=4), Layout(name="details", ratio=1))
+        layout["right"].split_column(Layout(name="tests", ratio=4), Layout(name="pvcs", ratio=1))
+        
+        # Header with fancy animation
+        layout["header"].update(Panel(self.render_header_fancy(), border_style="#444444", style=BG_STYLE))
+        
+        # Steps panel
+        layout["steps"].update(Panel(self.render_step_table(), title="📋 Steps", border_style="#444444", style=BG_STYLE))
+        layout["details"].update(Panel(self.render_checkpoint_details(), title="⚡ Active", border_style="#444444", style=BG_STYLE))
+        
+        # Tests and PVCs
+        layout["tests"].update(Panel(self.render_test_cards(), border_style="#444444", style=BG_STYLE))
         layout["pvcs"].update(Panel(self.render_pvc_table(), border_style="#444444", style=BG_STYLE))
+        
+        # BLINKENLIGHTS!
+        layout["blinken"].update(Panel(self.render_blinkenlights(), border_style="#444444", style=BG_STYLE))
+        
+        # Footer legend
         legend = Text()
-        legend.append(f"  {time.strftime('%H:%M:%S')}  │  ", style="#444444")
+        legend.append("  ", style="#444444")
         legend.append("□", style="#666666"); legend.append(" pending  ", style="#000000")
         legend.append("◧", style="#0066AA"); legend.append(" wait  ", style="#000000")
-        legend.append("■", style="#008800"); legend.append(" done  ", style="#000000")
-        legend.append("■", style="#CC0000"); legend.append(" fail  ", style="#000000")
-        legend.append("│  Ctrl+C exit", style="#444444")
+        legend.append("■", style="#33FF33"); legend.append(" done  ", style="#000000")
+        legend.append("■", style="#FF3333"); legend.append(" fail  ", style="#000000")
+        legend.append("│  ", style="#444444")
+        legend.append("✓", style="#33FF33"); legend.append(" pass  ", style="#000000")
+        legend.append("✗", style="#FF3333"); legend.append(" fail  ", style="#000000")
+        legend.append("│  ", style="#444444")
+        
+        # Animated exit hint
+        pulse = PULSE_FRAMES[self.frame % len(PULSE_FRAMES)]
+        legend.append(f"{pulse} ", style="#FF6633")
+        legend.append("Ctrl+C exit", style="#444444")
+        
         layout["footer"].update(Panel(legend, border_style="#444444", style=BG_STYLE))
         return layout
 
@@ -969,17 +1752,23 @@ class ClusterDashboard:
 
     def run(self, refresh_rate: float = 2.0):
         update_counter = 0
-        with Live(self.render_layout(), refresh_per_second=4, screen=True) as live:
+        # MAXIMUM BLINKENLIGHTS - 10 FPS for smooth animations!
+        with Live(self.render_layout(), refresh_per_second=10, screen=True) as live:
             try:
                 while True:
                     self.frame += 1
-                    # Only do full status check every N frames
-                    if update_counter % 8 == 0:
+                    # Only do full status check every N frames (less frequent = faster UI)
+                    if update_counter % 20 == 0:
                         self.update_all_statuses()
                     live.update(self.render_layout())
                     update_counter += 1
-                    time.sleep(0.25)  # Fast refresh for smooth animation
+                    time.sleep(0.1)  # 10 FPS for MAXIMUM BLINKENLIGHTS
             except KeyboardInterrupt:
+                # Fancy exit animation
+                for i in range(5):
+                    self.frame = i * 10
+                    live.update(self.render_layout())
+                    time.sleep(0.05)
                 pass
 
     def run_once(self):

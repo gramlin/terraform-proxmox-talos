@@ -934,6 +934,456 @@ test_storage_pools_created() {
   fi
 }
 
+# Test result file for dashboard
+TEST_RESULTS_FILE="$WORKDIR/.test-results.json"
+
+# Initialize test results
+init_test_results() {
+  echo '{"tests":[],"timestamp":"'$(date -Iseconds)'","status":"running"}' > "$TEST_RESULTS_FILE"
+}
+
+# Add test result
+add_test_result() {
+  local category="$1"
+  local name="$2"
+  local status="$3"  # pass, fail, skip
+  local message="${4:-}"
+  local duration="${5:-0}"
+  
+  local tmp=$(mktemp)
+  jq --arg cat "$category" \
+     --arg name "$name" \
+     --arg status "$status" \
+     --arg msg "$message" \
+     --arg dur "$duration" \
+     '.tests += [{"category":$cat,"name":$name,"status":$status,"message":$msg,"duration":($dur|tonumber)}]' \
+     "$TEST_RESULTS_FILE" > "$tmp" && mv "$tmp" "$TEST_RESULTS_FILE"
+}
+
+# Finalize test results
+finalize_test_results() {
+  local passed=$1
+  local failed=$2
+  local tmp=$(mktemp)
+  jq --arg p "$passed" --arg f "$failed" \
+     '.status = (if ($f|tonumber) == 0 then "passed" else "failed" end) | .passed = ($p|tonumber) | .failed = ($f|tonumber)' \
+     "$TEST_RESULTS_FILE" > "$tmp" && mv "$tmp" "$TEST_RESULTS_FILE"
+}
+
+# ==================== BASIC TESTS ====================
+
+test_kubectl_connectivity() {
+  local start=$(date +%s)
+  if kubectl cluster-info &>/dev/null; then
+    local dur=$(($(date +%s) - start))
+    info "  ✓ kubectl connectivity"
+    add_test_result "basic" "kubectl-connect" "pass" "API server reachable" "$dur"
+    return 0
+  else
+    add_test_result "basic" "kubectl-connect" "fail" "Cannot reach API server"
+    warn "  ✗ kubectl connectivity"
+    return 1
+  fi
+}
+
+test_all_nodes_ready() {
+  local start=$(date +%s)
+  local nodes_json=$(kubectl get nodes -o json 2>/dev/null)
+  local total=$(echo "$nodes_json" | jq '.items | length')
+  local ready=$(echo "$nodes_json" | jq '[.items[].status.conditions[] | select(.type=="Ready" and .status=="True")] | length')
+  local dur=$(($(date +%s) - start))
+  
+  if [[ "$ready" == "$total" ]] && [[ "$total" -gt 0 ]]; then
+    info "  ✓ all nodes ready ($ready/$total)"
+    add_test_result "basic" "nodes-ready" "pass" "$ready/$total nodes ready" "$dur"
+    return 0
+  else
+    warn "  ✗ nodes not ready ($ready/$total)"
+    add_test_result "basic" "nodes-ready" "fail" "$ready/$total nodes ready" "$dur"
+    return 1
+  fi
+}
+
+test_coredns_running() {
+  local start=$(date +%s)
+  local pods=$(kubectl get pods -n kube-system -l k8s-app=kube-dns -o json 2>/dev/null)
+  local running=$(echo "$pods" | jq '[.items[] | select(.status.phase=="Running")] | length')
+  local dur=$(($(date +%s) - start))
+  
+  if [[ "$running" -gt 0 ]]; then
+    info "  ✓ CoreDNS running ($running pods)"
+    add_test_result "basic" "coredns" "pass" "$running pods running" "$dur"
+    return 0
+  else
+    warn "  ✗ CoreDNS not running"
+    add_test_result "basic" "coredns" "fail" "No CoreDNS pods" "$dur"
+    return 1
+  fi
+}
+
+test_dns_resolution() {
+  local start=$(date +%s)
+  if kubectl run dns-test --image=busybox:1.36 --restart=Never --rm -i --timeout=30s \
+    -- nslookup kubernetes.default.svc.cluster.local &>/dev/null; then
+    local dur=$(($(date +%s) - start))
+    info "  ✓ DNS resolution works"
+    add_test_result "basic" "dns-resolution" "pass" "kubernetes.default resolved" "$dur"
+    return 0
+  else
+    local dur=$(($(date +%s) - start))
+    warn "  ✗ DNS resolution failed"
+    add_test_result "basic" "dns-resolution" "fail" "Cannot resolve kubernetes.default" "$dur"
+    return 1
+  fi
+}
+
+test_talos_api() {
+  local start=$(date +%s)
+  if [[ -f "$TALOS_CONFIG" ]] && talosctl --talosconfig "$TALOS_CONFIG" version &>/dev/null; then
+    local dur=$(($(date +%s) - start))
+    info "  ✓ Talos API reachable"
+    add_test_result "talos" "talos-api" "pass" "Talos API responding" "$dur"
+    return 0
+  else
+    local dur=$(($(date +%s) - start))
+    warn "  ✗ Talos API unreachable"
+    add_test_result "talos" "talos-api" "fail" "Cannot reach Talos API" "$dur"
+    return 1
+  fi
+}
+
+test_etcd_health() {
+  local start=$(date +%s)
+  if [[ -f "$TALOS_CONFIG" ]]; then
+    local etcd_status=$(talosctl --talosconfig "$TALOS_CONFIG" etcd status 2>&1 || true)
+    if echo "$etcd_status" | grep -q "HEALTHY"; then
+      local members=$(echo "$etcd_status" | grep -c "HEALTHY" || echo 0)
+      local dur=$(($(date +%s) - start))
+      info "  ✓ etcd healthy ($members members)"
+      add_test_result "talos" "etcd-health" "pass" "$members healthy members" "$dur"
+      return 0
+    fi
+  fi
+  local dur=$(($(date +%s) - start))
+  warn "  ✗ etcd health check failed"
+  add_test_result "talos" "etcd-health" "fail" "etcd unhealthy or unreachable" "$dur"
+  return 1
+}
+
+test_talos_services() {
+  local start=$(date +%s)
+  if [[ -f "$TALOS_CONFIG" ]]; then
+    local svc_status=$(talosctl --talosconfig "$TALOS_CONFIG" services 2>&1 | head -20 || true)
+    local running=$(echo "$svc_status" | grep -c "Running" || echo 0)
+    local dur=$(($(date +%s) - start))
+    if [[ "$running" -gt 5 ]]; then
+      info "  ✓ Talos services running ($running)"
+      add_test_result "talos" "talos-services" "pass" "$running services running" "$dur"
+      return 0
+    fi
+  fi
+  local dur=$(($(date +%s) - start))
+  warn "  ✗ Talos services check failed"
+  add_test_result "talos" "talos-services" "fail" "Services not running" "$dur"
+  return 1
+}
+
+# ==================== NETWORK TESTS ====================
+
+test_cilium_status() {
+  local start=$(date +%s)
+  if command -v cilium &>/dev/null; then
+    local status=$(cilium status --wait=false 2>&1 || true)
+    if echo "$status" | grep -q "OK"; then
+      local dur=$(($(date +%s) - start))
+      info "  ✓ Cilium status OK"
+      add_test_result "network" "cilium-status" "pass" "Cilium healthy" "$dur"
+      return 0
+    fi
+  fi
+  local dur=$(($(date +%s) - start))
+  warn "  ✗ Cilium status check failed"
+  add_test_result "network" "cilium-status" "fail" "Cilium not healthy" "$dur"
+  return 1
+}
+
+test_pod_networking() {
+  local start=$(date +%s)
+  # Create test pods and verify they can communicate
+  kubectl delete pod net-test-1 net-test-2 --ignore-not-found=true &>/dev/null || true
+  
+  kubectl run net-test-1 --image=busybox:1.36 --restart=Never --labels=test=net \
+    -- sleep 300 &>/dev/null || true
+  kubectl run net-test-2 --image=busybox:1.36 --restart=Never --labels=test=net \
+    -- sleep 300 &>/dev/null || true
+  
+  sleep 5
+  
+  local ip1=$(kubectl get pod net-test-1 -o jsonpath='{.status.podIP}' 2>/dev/null || echo "")
+  
+  if [[ -n "$ip1" ]]; then
+    if kubectl exec net-test-2 -- ping -c 1 -W 2 "$ip1" &>/dev/null; then
+      local dur=$(($(date +%s) - start))
+      info "  ✓ Pod-to-pod networking works"
+      add_test_result "network" "pod-network" "pass" "Pods can communicate" "$dur"
+      kubectl delete pod net-test-1 net-test-2 --ignore-not-found=true &>/dev/null || true
+      return 0
+    fi
+  fi
+  
+  local dur=$(($(date +%s) - start))
+  warn "  ✗ Pod-to-pod networking failed"
+  add_test_result "network" "pod-network" "fail" "Pods cannot communicate" "$dur"
+  kubectl delete pod net-test-1 net-test-2 --ignore-not-found=true &>/dev/null || true
+  return 1
+}
+
+test_service_networking() {
+  local start=$(date +%s)
+  # Test ClusterIP service connectivity
+  if kubectl get svc kubernetes -o jsonpath='{.spec.clusterIP}' &>/dev/null; then
+    local dur=$(($(date +%s) - start))
+    info "  ✓ Service networking available"
+    add_test_result "network" "service-network" "pass" "ClusterIP services work" "$dur"
+    return 0
+  fi
+  local dur=$(($(date +%s) - start))
+  add_test_result "network" "service-network" "fail" "ClusterIP services not working" "$dur"
+  return 1
+}
+
+test_loadbalancer() {
+  local start=$(date +%s)
+  local lb_svcs=$(kubectl get svc -A -o json | jq '[.items[] | select(.spec.type=="LoadBalancer" and .status.loadBalancer.ingress)] | length')
+  local dur=$(($(date +%s) - start))
+  
+  if [[ "$lb_svcs" -gt 0 ]]; then
+    info "  ✓ LoadBalancer services have IPs ($lb_svcs)"
+    add_test_result "network" "loadbalancer" "pass" "$lb_svcs LBs have IPs" "$dur"
+    return 0
+  else
+    warn "  ✗ No LoadBalancer IPs assigned"
+    add_test_result "network" "loadbalancer" "fail" "No LB IPs" "$dur"
+    return 1
+  fi
+}
+
+# ==================== STORAGE TESTS ====================
+
+test_storageclass_exists() {
+  local start=$(date +%s)
+  if kubectl get sc linstor-lvm-r1 &>/dev/null; then
+    local dur=$(($(date +%s) - start))
+    info "  ✓ StorageClass linstor-lvm-r1 exists"
+    add_test_result "storage" "storageclass" "pass" "linstor-lvm-r1 exists" "$dur"
+    return 0
+  fi
+  local dur=$(($(date +%s) - start))
+  add_test_result "storage" "storageclass" "fail" "StorageClass not found" "$dur"
+  return 1
+}
+
+test_pvc_provisioning() {
+  local start=$(date +%s)
+  # Create test PVC
+  kubectl delete pvc test-pvc-provisioning --ignore-not-found=true &>/dev/null || true
+  
+  cat <<EOF | kubectl apply -f - &>/dev/null
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: test-pvc-provisioning
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: linstor-lvm-r1
+  resources:
+    requests:
+      storage: 1Gi
+EOF
+
+  # Wait for PVC to be bound
+  for i in {1..30}; do
+    local phase=$(kubectl get pvc test-pvc-provisioning -o jsonpath='{.status.phase}' 2>/dev/null || echo "")
+    if [[ "$phase" == "Bound" ]]; then
+      local dur=$(($(date +%s) - start))
+      info "  ✓ PVC provisioning works"
+      add_test_result "storage" "pvc-provision" "pass" "PVC bound successfully" "$dur"
+      kubectl delete pvc test-pvc-provisioning --ignore-not-found=true &>/dev/null || true
+      return 0
+    fi
+    sleep 1
+  done
+  
+  local dur=$(($(date +%s) - start))
+  warn "  ✗ PVC provisioning failed"
+  add_test_result "storage" "pvc-provision" "fail" "PVC not bound within 30s" "$dur"
+  kubectl delete pvc test-pvc-provisioning --ignore-not-found=true &>/dev/null || true
+  return 1
+}
+
+test_volume_mount() {
+  local start=$(date +%s)
+  kubectl delete pod test-volume-mount --ignore-not-found=true &>/dev/null || true
+  kubectl delete pvc test-volume-pvc --ignore-not-found=true &>/dev/null || true
+  
+  cat <<EOF | kubectl apply -f - &>/dev/null
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: test-volume-pvc
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: linstor-lvm-r1
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: test-volume-mount
+spec:
+  containers:
+  - name: test
+    image: busybox:1.36
+    command: ["sh", "-c", "echo 'test' > /data/test.txt && cat /data/test.txt && sleep 10"]
+    volumeMounts:
+    - name: data
+      mountPath: /data
+  volumes:
+  - name: data
+    persistentVolumeClaim:
+      claimName: test-volume-pvc
+  restartPolicy: Never
+EOF
+
+  # Wait for pod to complete
+  for i in {1..60}; do
+    local phase=$(kubectl get pod test-volume-mount -o jsonpath='{.status.phase}' 2>/dev/null || echo "")
+    if [[ "$phase" == "Succeeded" ]]; then
+      local dur=$(($(date +%s) - start))
+      info "  ✓ Volume mount and write works"
+      add_test_result "storage" "volume-mount" "pass" "Volume mounted and writable" "$dur"
+      kubectl delete pod test-volume-mount --ignore-not-found=true &>/dev/null || true
+      kubectl delete pvc test-volume-pvc --ignore-not-found=true &>/dev/null || true
+      return 0
+    elif [[ "$phase" == "Failed" ]]; then
+      break
+    fi
+    sleep 1
+  done
+  
+  local dur=$(($(date +%s) - start))
+  warn "  ✗ Volume mount test failed"
+  add_test_result "storage" "volume-mount" "fail" "Cannot write to volume" "$dur"
+  kubectl delete pod test-volume-mount --ignore-not-found=true &>/dev/null || true
+  kubectl delete pvc test-volume-pvc --ignore-not-found=true &>/dev/null || true
+  return 1
+}
+
+# ==================== APP TESTS ====================
+
+test_harbor_health() {
+  local start=$(date +%s)
+  if [[ "$INSTALL_HARBOR" != "true" ]]; then
+    add_test_result "apps" "harbor" "skip" "Not installed"
+    return 0
+  fi
+  
+  local ready=$(kubectl get pods -n harbor -o json 2>/dev/null | jq '[.items[] | select(.status.phase=="Running")] | length')
+  local total=$(kubectl get pods -n harbor -o json 2>/dev/null | jq '.items | length')
+  local dur=$(($(date +%s) - start))
+  
+  if [[ "$ready" == "$total" ]] && [[ "$total" -gt 0 ]]; then
+    info "  ✓ Harbor healthy ($ready/$total pods)"
+    add_test_result "apps" "harbor" "pass" "$ready/$total pods running" "$dur"
+    return 0
+  else
+    warn "  ✗ Harbor not healthy ($ready/$total)"
+    add_test_result "apps" "harbor" "fail" "$ready/$total pods" "$dur"
+    return 1
+  fi
+}
+
+test_monitoring_health() {
+  local start=$(date +%s)
+  if [[ "$INSTALL_MONITORING" != "true" ]]; then
+    add_test_result "apps" "monitoring" "skip" "Not installed"
+    return 0
+  fi
+  
+  local ns="monitoring"
+  local ready=$(kubectl get pods -n "$ns" -o json 2>/dev/null | jq '[.items[] | select(.status.phase=="Running")] | length')
+  local dur=$(($(date +%s) - start))
+  
+  if [[ "$ready" -gt 0 ]]; then
+    info "  ✓ Monitoring healthy ($ready pods)"
+    add_test_result "apps" "monitoring" "pass" "$ready pods running" "$dur"
+    return 0
+  else
+    warn "  ✗ Monitoring not healthy"
+    add_test_result "apps" "monitoring" "fail" "No pods running" "$dur"
+    return 1
+  fi
+}
+
+test_gitea_health() {
+  local start=$(date +%s)
+  if [[ "$INSTALL_GITEA" != "true" ]]; then
+    add_test_result "apps" "gitea" "skip" "Not installed"
+    return 0
+  fi
+  
+  local ready=$(kubectl get pods -n gitea -o json 2>/dev/null | jq '[.items[] | select(.status.phase=="Running")] | length')
+  local total=$(kubectl get pods -n gitea -o json 2>/dev/null | jq '.items | length')
+  local dur=$(($(date +%s) - start))
+  
+  if [[ "$ready" == "$total" ]] && [[ "$total" -gt 0 ]]; then
+    info "  ✓ Gitea healthy ($ready/$total pods)"
+    add_test_result "apps" "gitea" "pass" "$ready/$total pods running" "$dur"
+    return 0
+  else
+    warn "  ✗ Gitea not healthy ($ready/$total)"
+    add_test_result "apps" "gitea" "fail" "$ready/$total pods" "$dur"
+    return 1
+  fi
+}
+
+test_traefik_health() {
+  local start=$(date +%s)
+  local ready=$(kubectl get pods -n traefik -l app.kubernetes.io/name=traefik -o json 2>/dev/null | jq '[.items[] | select(.status.phase=="Running")] | length')
+  local dur=$(($(date +%s) - start))
+  
+  if [[ "$ready" -gt 0 ]]; then
+    info "  ✓ Traefik healthy ($ready pods)"
+    add_test_result "apps" "traefik" "pass" "$ready pods running" "$dur"
+    return 0
+  else
+    warn "  ✗ Traefik not healthy"
+    add_test_result "apps" "traefik" "fail" "No pods running" "$dur"
+    return 1
+  fi
+}
+
+test_ingress_connectivity() {
+  local start=$(date +%s)
+  local lb_ip=$(kubectl get svc -n traefik traefik -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "")
+  
+  if [[ -n "$lb_ip" ]]; then
+    if curl -sf -o /dev/null -w '%{http_code}' "http://$lb_ip" --connect-timeout 5 &>/dev/null; then
+      local dur=$(($(date +%s) - start))
+      info "  ✓ Ingress reachable at $lb_ip"
+      add_test_result "apps" "ingress" "pass" "Reachable at $lb_ip" "$dur"
+      return 0
+    fi
+  fi
+  
+  local dur=$(($(date +%s) - start))
+  warn "  ✗ Ingress not reachable"
+  add_test_result "apps" "ingress" "fail" "Cannot reach ingress" "$dur"
+  return 1
+}
+
 run_all_tests() {
   step "Running validation tests"
   
@@ -945,20 +1395,61 @@ run_all_tests() {
     export KUBECONFIG="${KUBECONFIG_OUT:-$WORKDIR/kubeconfig.yml}"
   fi
   
+  init_test_results
+  
+  local passed=0
   local failed=0
   
-  test_drbd_modules_loaded || failed=$((failed + 1))
-  test_lvm_init_daemonset || failed=$((failed + 1))
-  test_satellite_readiness || failed=$((failed + 1))
-  test_linstor_nodes_registered || failed=$((failed + 1))
-  test_storage_pools_created || failed=$((failed + 1))
+  echo ""
+  info "━━━ Basic Cluster Tests ━━━"
+  test_kubectl_connectivity && passed=$((passed+1)) || failed=$((failed+1))
+  test_all_nodes_ready && passed=$((passed+1)) || failed=$((failed+1))
+  test_coredns_running && passed=$((passed+1)) || failed=$((failed+1))
+  test_dns_resolution && passed=$((passed+1)) || failed=$((failed+1))
   
   echo ""
+  info "━━━ Talos Tests ━━━"
+  test_talos_api && passed=$((passed+1)) || failed=$((failed+1))
+  test_etcd_health && passed=$((passed+1)) || failed=$((failed+1))
+  test_talos_services && passed=$((passed+1)) || failed=$((failed+1))
+  
+  echo ""
+  info "━━━ Network Tests ━━━"
+  test_cilium_status && passed=$((passed+1)) || failed=$((failed+1))
+  test_pod_networking && passed=$((passed+1)) || failed=$((failed+1))
+  test_service_networking && passed=$((passed+1)) || failed=$((failed+1))
+  test_loadbalancer && passed=$((passed+1)) || failed=$((failed+1))
+  
+  if [[ "$INSTALL_PIRAEUS" == "1" ]]; then
+    echo ""
+    info "━━━ Storage Tests ━━━"
+    test_drbd_modules_loaded && passed=$((passed+1)) || failed=$((failed+1))
+    test_lvm_init_daemonset && passed=$((passed+1)) || failed=$((failed+1))
+    test_satellite_readiness && passed=$((passed+1)) || failed=$((failed+1))
+    test_linstor_nodes_registered && passed=$((passed+1)) || failed=$((failed+1))
+    test_storage_pools_created && passed=$((passed+1)) || failed=$((failed+1))
+    test_storageclass_exists && passed=$((passed+1)) || failed=$((failed+1))
+    test_pvc_provisioning && passed=$((passed+1)) || failed=$((failed+1))
+    test_volume_mount && passed=$((passed+1)) || failed=$((failed+1))
+  fi
+  
+  echo ""
+  info "━━━ Application Tests ━━━"
+  test_traefik_health && passed=$((passed+1)) || failed=$((failed+1))
+  test_harbor_health && passed=$((passed+1)) || failed=$((failed+1))
+  test_monitoring_health && passed=$((passed+1)) || failed=$((failed+1))
+  test_gitea_health && passed=$((passed+1)) || failed=$((failed+1))
+  test_ingress_connectivity && passed=$((passed+1)) || failed=$((failed+1))
+  
+  finalize_test_results "$passed" "$failed"
+  
+  echo ""
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
   if [[ $failed -eq 0 ]]; then
-    info "✓✓✓ ALL TESTS PASSED ✓✓✓"
+    info "✓✓✓ ALL $passed TESTS PASSED ✓✓✓"
     return 0
   else
-    warn "⚠ $failed tests failed"
+    warn "⚠ $failed FAILED, $passed PASSED"
     return 1
   fi
 }
