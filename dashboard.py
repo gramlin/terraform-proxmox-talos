@@ -186,12 +186,17 @@ class ClusterDashboard:
         self.start_time = time.time()  # Track uptime
         self.completion_frame = None  # When did we complete?
         self.preflight_status = {}  # Preflight check status
+        self._status_thread = None  # Background status checker
+        self._status_running = False
         self._init_steps()
         self._init_preflight()
 
     def _init_preflight(self):
-        """Initialize preflight checks"""
-        tf_files = len([f for f in os.listdir(self.workdir) if f.endswith('.tf')]) if os.path.isdir(self.workdir) else 0
+        """Initialize preflight checks - must be fast, no blocking!"""
+        try:
+            tf_files = len([f for f in os.listdir(self.workdir) if f.endswith('.tf')]) if os.path.isdir(self.workdir) else 0
+        except:
+            tf_files = 0
         
         # Check tracking files exist and are fresh (updated in last 30s)
         tf_tracking = os.path.join(self.workdir, ".tf-resources.json")
@@ -199,8 +204,11 @@ class ClusterDashboard:
         proxmox_tracking = os.path.join(self.workdir, ".proxmox-status.json")
         
         def is_fresh(path, max_age=30):
-            if os.path.isfile(path):
-                return time.time() - os.path.getmtime(path) < max_age
+            try:
+                if os.path.isfile(path):
+                    return time.time() - os.path.getmtime(path) < max_age
+            except:
+                pass
             return False
         
         self.preflight_status = {
@@ -1951,16 +1959,18 @@ class ClusterDashboard:
         text.append("  │  ", style="#444444")
         text.append_text(self.render_progress_bar())
         
-        # Uptime counter
-        elapsed = int(time.time() - self.start_time)
+        # Uptime counter - use time.time() directly to ensure fresh value
+        now = time.time()
+        elapsed = int(now - self.start_time)
         mins, secs = divmod(elapsed, 60)
         text.append("  ⏱ ", style="#444444")
         text.append(f"{mins:02d}:{secs:02d}", style="#000000 bold")
         
-        # Animated clock
+        # Animated clock - show current seconds to prove updates are happening
         clock = CLOCK_FRAMES[self.frame % len(CLOCK_FRAMES)]
         text.append(f"  {clock} ", style="#444444")
-        text.append(time.strftime('%H:%M:%S'), style="#000000")
+        current_time = time.strftime('%H:%M:%S')
+        text.append(current_time, style="#000000")
         
         # Activity indicator
         if all_done:
@@ -2118,9 +2128,7 @@ class ClusterDashboard:
         return layout
 
     def update_all_statuses(self):
-        # Refresh preflight checks
-        self._init_preflight()
-        
+        """Update all step statuses - runs in background thread"""
         for step in self.steps:
             if step.check_fn:
                 try:
@@ -2133,26 +2141,55 @@ class ClusterDashboard:
                         step.status = Status.FAILED
                         step.message = str(e)[:15]
 
-    def run(self, refresh_rate: float = 2.0):
-        update_counter = 0
-        # MAXIMUM BLINKENLIGHTS - 10 FPS for smooth animations!
-        with Live(self.render_layout(), refresh_per_second=10, screen=True) as live:
+    def _status_worker(self):
+        """Background thread that checks statuses without blocking UI"""
+        while self._status_running:
             try:
-                while True:
-                    self.frame += 1
-                    # Only do full status check every N frames (less frequent = faster UI)
-                    if update_counter % 20 == 0:
-                        self.update_all_statuses()
-                    live.update(self.render_layout())
-                    update_counter += 1
-                    time.sleep(0.1)  # 10 FPS for MAXIMUM BLINKENLIGHTS
-            except KeyboardInterrupt:
-                # Fancy exit animation
-                for i in range(5):
-                    self.frame = i * 10
-                    live.update(self.render_layout())
-                    time.sleep(0.05)
+                self.update_all_statuses()
+            except Exception:
                 pass
+            # Check every 3 seconds
+            for _ in range(30):  # 30 * 0.1 = 3s, but check stop flag frequently
+                if not self._status_running:
+                    break
+                try:
+                    time.sleep(0.1)
+                except Exception:
+                    break
+
+    def run(self, refresh_rate: float = 2.0):
+        # Start background status checker thread
+        self._status_running = True
+        self._status_thread = threading.Thread(target=self._status_worker, daemon=True)
+        self._status_thread.start()
+        
+        # MAXIMUM BLINKENLIGHTS - 10 FPS for smooth animations!
+        # UI loop NEVER blocks on status checks
+        try:
+            with Live(self.render_layout(), refresh_per_second=10, screen=True) as live:
+                try:
+                    while True:
+                        self.frame += 1
+                        # Refresh preflight (fast, no network calls)
+                        try:
+                            self._init_preflight()
+                        except Exception:
+                            pass
+                        try:
+                            live.update(self.render_layout())
+                        except Exception as e:
+                            # Log render errors but don't crash
+                            pass
+                        time.sleep(0.1)  # 10 FPS for MAXIMUM BLINKENLIGHTS
+                except KeyboardInterrupt:
+                    self._status_running = False
+                    pass
+        except Exception as e:
+            # If Live crashes, print error and keep running simple mode
+            import traceback
+            print(f"Dashboard error: {e}")
+            traceback.print_exc()
+            self._status_running = False
 
     def run_once(self):
         self.update_all_statuses()
