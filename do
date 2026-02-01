@@ -437,7 +437,6 @@ wait_pods_ready() {
           fi
         done
       fi
-      fi
     fi
     
     sleep 3
