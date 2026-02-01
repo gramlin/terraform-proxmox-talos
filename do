@@ -283,6 +283,7 @@ wait_pods_ready() {
   local ns="$1"
   local label="${2:-}"
   local start=$SECONDS
+  local last_details_time=0
   
   local selector=""
   [[ -n "$label" ]] && selector="-l $label"
@@ -299,75 +300,143 @@ wait_pods_ready() {
     pod_data=$(kubectl get pods -n "$ns" $selector --no-headers 2>/dev/null || true)
     pvc_data=$(kubectl get pvc -n "$ns" --no-headers 2>/dev/null || true)
     
-    # Count pods
+    # Collect pod info into arrays for detailed display
     local total=0 pending=0 creating=0 failed=0 actually_ready=0
+    local pending_pods=() creating_pods=() failed_pods=() starting_pods=()
+    
     if [[ -n "$pod_data" ]]; then
       total=$(echo "$pod_data" | wc -l | tr -d ' ')
-      pending=$(echo "$pod_data" | grep -c "Pending" || true)
-      creating=$(echo "$pod_data" | grep -cE "ContainerCreating|Init|PodInitializing" || true)
-      failed=$(echo "$pod_data" | grep -cE "Error|CrashLoopBackOff|ImagePullBackOff|ErrImagePull" || true)
       
-      # Count fully ready pods
       while IFS= read -r line; do
         if [[ -n "$line" ]]; then
+          local pod_name=$(echo "$line" | awk '{print $1}')
           local pod_ready=$(echo "$line" | awk '{print $2}')
           local pod_status=$(echo "$line" | awk '{print $3}')
-          if [[ "$pod_status" == "Running" ]]; then
-            local containers_ready=${pod_ready%/*}
-            local containers_total=${pod_ready#*/}
-            if [[ "$containers_ready" == "$containers_total" ]]; then
-              actually_ready=$((actually_ready + 1))
-            fi
-          fi
+          local containers_ready=${pod_ready%/*}
+          local containers_total=${pod_ready#*/}
+          
+          # Shorten pod name (remove hash suffix)
+          local short_name=$(echo "$pod_name" | sed -E 's/-[a-z0-9]{8,10}-[a-z0-9]{5}$//; s/-[0-9]+$//')
+          
+          case "$pod_status" in
+            Pending)
+              pending=$((pending + 1))
+              pending_pods+=("$short_name")
+              ;;
+            ContainerCreating|Init:*|PodInitializing)
+              creating=$((creating + 1))
+              creating_pods+=("$short_name")
+              ;;
+            Error|CrashLoopBackOff|ImagePullBackOff|ErrImagePull)
+              failed=$((failed + 1))
+              failed_pods+=("$short_name")
+              ;;
+            Running)
+              if [[ "$containers_ready" == "$containers_total" ]]; then
+                actually_ready=$((actually_ready + 1))
+              else
+                starting_pods+=("$short_name ($containers_ready/$containers_total)")
+              fi
+              ;;
+          esac
         fi
       done <<< "$pod_data"
     fi
     
     # Count PVCs
     local pvc_total=0 pvc_bound=0 pvc_pending=0
+    local pending_pvcs=()
     if [[ -n "$pvc_data" ]]; then
       pvc_total=$(echo "$pvc_data" | wc -l | tr -d ' ')
       pvc_bound=$(echo "$pvc_data" | grep -c "Bound" || true)
-      pvc_pending=$(echo "$pvc_data" | grep -c "Pending" || true)
+      while IFS= read -r line; do
+        if echo "$line" | grep -q "Pending"; then
+          pvc_pending=$((pvc_pending + 1))
+          local pvc_name=$(echo "$line" | awk '{print $1}')
+          pending_pvcs+=("$pvc_name")
+        fi
+      done <<< "$pvc_data"
     fi
     
-    # Build status line
-    local status_line="[${elapsed_min}m${elapsed_sec}s] Pods: ${actually_ready}/${total} ready"
-    [[ $creating -gt 0 ]] && status_line+=", ${creating} creating"
-    [[ $pending -gt 0 ]] && status_line+=", ${pending} pending"
-    [[ $failed -gt 0 ]] && status_line+=", ${failed} FAILED"
+    # Clear line and move cursor up if we printed details before
+    printf "\r\033[K"
+    
+    # Build status line with emoji indicators
+    local status_line="[${elapsed_min}m${elapsed_sec}s] "
+    status_line+="✓${actually_ready} "
+    [[ $creating -gt 0 ]] && status_line+="⏳${creating} "
+    [[ $pending -gt 0 ]] && status_line+="⏸${pending} "
+    [[ ${#starting_pods[@]} -gt 0 ]] && status_line+="🚀${#starting_pods[@]} "
+    [[ $failed -gt 0 ]] && status_line+="❌${failed} "
+    status_line+="(${total} total)"
     
     if [[ $pvc_total -gt 0 ]]; then
-      status_line+=" | PVCs: ${pvc_bound}/${pvc_total}"
-      [[ $pvc_pending -gt 0 ]] && status_line+=" (${pvc_pending} pending)"
+      status_line+=" | 💾${pvc_bound}/${pvc_total}"
     fi
     
-    printf "\r\033[K  → %s" "$status_line"
+    printf "  → %s\n" "$status_line"
+    
+    # Show what's happening (always show current activity)
+    local activity_shown=false
+    
+    if [[ ${#creating_pods[@]} -gt 0 ]]; then
+      printf "    ⏳ Creating: %s\n" "$(IFS=', '; echo "${creating_pods[*]}")"
+      activity_shown=true
+    fi
+    
+    if [[ ${#starting_pods[@]} -gt 0 ]]; then
+      printf "    🚀 Starting: %s\n" "$(IFS=', '; echo "${starting_pods[*]}")"
+      activity_shown=true
+    fi
+    
+    if [[ ${#pending_pods[@]} -gt 0 ]]; then
+      printf "    ⏸  Pending: %s\n" "$(IFS=', '; echo "${pending_pods[*]}")"
+      activity_shown=true
+    fi
+    
+    if [[ ${#pending_pvcs[@]} -gt 0 ]]; then
+      printf "    💾 PVC pending: %s\n" "$(IFS=', '; echo "${pending_pvcs[*]}")"
+      activity_shown=true
+    fi
+    
+    if [[ ${#failed_pods[@]} -gt 0 ]]; then
+      printf "    ❌ Failed: %s\n" "$(IFS=', '; echo "${failed_pods[*]}")"
+      activity_shown=true
+    fi
     
     # Check if all ready
     if [[ $total -gt 0 && $actually_ready -eq $total && $pvc_pending -eq 0 ]]; then
-      printf "\r\033[K  ✓ All %d pods ready (%dm%ds)\n" "$total" "$elapsed_min" "$elapsed_sec"
+      printf "  ✅ All %d pods ready (%dm%ds)\n" "$total" "$elapsed_min" "$elapsed_sec"
       return 0
     fi
     
-    # Show details for stuck pods every 30 seconds
-    if [[ $((elapsed % 30)) -eq 0 && $elapsed -gt 0 ]]; then
-      echo ""
+    # Show detailed diagnostics every 60 seconds for stuck items
+    if [[ $((elapsed - last_details_time)) -ge 60 && $elapsed -gt 0 ]]; then
+      last_details_time=$elapsed
+      
       if [[ $pvc_pending -gt 0 ]]; then
-        warn "Pending PVCs:"
-        echo "$pvc_data" | grep "Pending" | while read -r line; do
-          local pvc_name=$(echo "$line" | awk '{print $1}')
-          echo "    - $pvc_name"
-          kubectl describe pvc "$pvc_name" -n "$ns" 2>/dev/null | grep -A2 "Events:" | tail -2 | sed 's/^/      /'
+        echo ""
+        warn "PVC diagnostics:"
+        for pvc_name in "${pending_pvcs[@]}"; do
+          local events=$(kubectl describe pvc "$pvc_name" -n "$ns" 2>/dev/null | grep -A3 "Events:" | tail -3)
+          if [[ -n "$events" ]]; then
+            echo "    $pvc_name:"
+            echo "$events" | sed 's/^/      /'
+          fi
         done
       fi
+      
       if [[ $failed -gt 0 ]]; then
-        warn "Failed pods:"
-        echo "$pod_data" | grep -E "Error|CrashLoopBackOff|ImagePullBackOff" | while read -r line; do
-          local pod_name=$(echo "$line" | awk '{print $1}')
-          local pod_status=$(echo "$line" | awk '{print $3}')
-          echo "    - $pod_name ($pod_status)"
+        echo ""
+        warn "Pod diagnostics:"
+        for pod_info in "${failed_pods[@]}"; do
+          local pod_name=$(kubectl get pods -n "$ns" --no-headers 2>/dev/null | grep -E "Error|CrashLoopBackOff" | head -1 | awk '{print $1}')
+          if [[ -n "$pod_name" ]]; then
+            echo "    $pod_name:"
+            kubectl logs "$pod_name" -n "$ns" --tail=5 2>/dev/null | sed 's/^/      /' || true
+          fi
         done
+      fi
       fi
     fi
     
@@ -1361,6 +1430,19 @@ deploy_harbor() {
   
   kubectl create namespace "$ns" --dry-run=client -o yaml | kubectl apply -f -
 
+  # Fix: Delete any PVCs that are stuck Pending without a storageClass
+  # This can happen if Harbor was installed before we had proper storageClass config
+  info "Checking for stuck PVCs..."
+  local stuck_pvcs
+  stuck_pvcs=$(kubectl get pvc -n "$ns" -o json 2>/dev/null | jq -r '.items[] | select(.status.phase=="Pending") | select(.spec.storageClassName==null or .spec.storageClassName=="") | .metadata.name' 2>/dev/null || true)
+  if [[ -n "$stuck_pvcs" ]]; then
+    warn "Found PVCs without storageClass, deleting to allow recreation:"
+    for pvc in $stuck_pvcs; do
+      warn "  Deleting stuck PVC: $pvc"
+      kubectl delete pvc "$pvc" -n "$ns" --ignore-not-found
+    done
+  fi
+
   # Create TLS certificate if cert-manager available
   if kubectl get clusterissuer ingress &>/dev/null; then
     kubectl apply -f - <<EOF
@@ -1422,9 +1504,10 @@ persistence:
     trivy:
       storageClass: "$STORAGECLASS_NAME"
       size: 5Gi
-    jobservice:
-      storageClass: "$STORAGECLASS_NAME"
-      size: 1Gi
+jobservice:
+  jobLoggers:
+    - file
+    - stdout
 harborAdminPassword: "$HARBOR_ADMIN_PASSWORD"
 trivy:
   enabled: true
