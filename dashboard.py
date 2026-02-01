@@ -2,6 +2,16 @@
 """
 Talos Cluster Deployment Dashboard
 A visual TUI for monitoring cluster deployment progress.
+
+Setup:
+  python3 -m venv .venv
+  source .venv/bin/activate  # or: .venv/bin/activate.fish
+  pip install -r requirements.txt
+
+Usage:
+  ./dashboard.py              # Live dashboard
+  ./dashboard.py --once       # Single check
+  ./dashboard.py --refresh 5  # Slower refresh
 """
 
 import subprocess

@@ -1,0 +1,114 @@
+#!/usr/bin/env bash
+#
+# deploy-with-dashboard.sh
+# Runs ./do apply with live dashboard monitoring
+#
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR"
+
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m'
+
+info() { echo -e "${GREEN}▶${NC} $*"; }
+warn() { echo -e "${YELLOW}⚠${NC} $*"; }
+die() { echo -e "${RED}✗${NC} $*" >&2; exit 1; }
+
+# Check dependencies
+command -v python3 >/dev/null || die "python3 not found"
+[[ -f "./do" ]] || die "./do script not found"
+[[ -f "./dashboard.py" ]] || die "./dashboard.py not found"
+
+# Setup venv if needed
+if [[ ! -d ".venv" ]]; then
+    info "Creating Python venv..."
+    python3 -m venv .venv
+fi
+
+if ! .venv/bin/python -c "import rich" 2>/dev/null; then
+    info "Installing dependencies..."
+    .venv/bin/pip install -q rich
+fi
+
+# Parse arguments
+DO_CMD="${1:-apply}"
+shift || true
+
+cleanup() {
+    info "Cleaning up..."
+    # Kill background jobs
+    jobs -p | xargs -r kill 2>/dev/null || true
+    wait 2>/dev/null || true
+}
+trap cleanup EXIT
+
+# Check if we have a terminal that supports split
+if command -v tmux >/dev/null && [[ -z "${TMUX:-}" ]]; then
+    # Not in tmux - offer to use it
+    echo ""
+    echo "╭─────────────────────────────────────────────────╮"
+    echo "│  Talos Cluster Deployment with Live Dashboard   │"
+    echo "╰─────────────────────────────────────────────────╯"
+    echo ""
+    echo "Options:"
+    echo "  1) Run with tmux split (recommended)"
+    echo "  2) Run dashboard only (./do in another terminal)"
+    echo "  3) Run ./do only (no dashboard)"
+    echo ""
+    read -p "Choose [1-3]: " choice
+    
+    case "$choice" in
+        1)
+            info "Starting tmux session with split panes..."
+            tmux new-session -d -s deploy -n main \
+                "cd '$SCRIPT_DIR' && ./do $DO_CMD $*; echo ''; echo 'Press Enter to close...'; read"
+            tmux split-window -h -t deploy \
+                "cd '$SCRIPT_DIR' && .venv/bin/python dashboard.py"
+            tmux select-pane -t deploy:0.0
+            tmux attach-session -t deploy
+            exit 0
+            ;;
+        2)
+            info "Starting dashboard..."
+            echo "Run './do $DO_CMD' in another terminal"
+            echo ""
+            exec .venv/bin/python dashboard.py
+            ;;
+        3)
+            exec ./do "$DO_CMD" "$@"
+            ;;
+        *)
+            die "Invalid choice"
+            ;;
+    esac
+elif [[ -n "${TMUX:-}" ]]; then
+    # Already in tmux - split the pane
+    info "Splitting tmux pane for dashboard..."
+    tmux split-window -h -t "$TMUX_PANE" \
+        "cd '$SCRIPT_DIR' && .venv/bin/python dashboard.py"
+    exec ./do "$DO_CMD" "$@"
+else
+    # No tmux available - run in background with simple output
+    info "Starting deployment with background dashboard..."
+    info "Dashboard updates will appear below deployment output"
+    echo ""
+    
+    # Start dashboard in background, output to separate file
+    .venv/bin/python dashboard.py --once &
+    DASHBOARD_PID=$!
+    
+    # Run the deploy
+    ./do "$DO_CMD" "$@"
+    DO_EXIT=$?
+    
+    # Final status
+    echo ""
+    info "Final status:"
+    .venv/bin/python dashboard.py --once
+    
+    exit $DO_EXIT
+fi
