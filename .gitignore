@@ -10,7 +10,11 @@ support.zip
 support/
 talosconfig.yml
 kubeconfig.yml
+kubeconfig.*.yml
 kubernetes-ingress-ca-crt.pem
 tmp/
 secret*
 secrets-proxmox.tf
+
+# Local config overrides
+do.local.cfg

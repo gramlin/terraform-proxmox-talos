@@ -354,3 +354,13 @@ variable "harbor_metrics_enabled" {
   type        = bool
   default     = true
 }
+
+# =============================================================================
+# Ingress Controller Selection
+# =============================================================================
+
+variable "cilium_ingress_enabled" {
+  description = "Enable Cilium's built-in ingress controller. Set to false to use Traefik instead (recommended for more features)."
+  type        = bool
+  default     = false
+}

@@ -102,13 +102,15 @@ data "helm_template" "cilium" {
       name  = "devices"
       value = "{eth0}"
     },
+    # Cilium Ingress Controller - disabled by default, use Traefik instead
+    # Set var.cilium_ingress_enabled = true to use Cilium's built-in ingress
     {
       name  = "ingressController.enabled"
-      value = "true"
+      value = tostring(var.cilium_ingress_enabled)
     },
     {
       name  = "ingressController.default"
-      value = "true"
+      value = tostring(var.cilium_ingress_enabled)
     },
     {
       name  = "ingressController.loadbalancerMode"

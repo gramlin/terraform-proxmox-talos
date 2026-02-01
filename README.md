@@ -291,20 +291,35 @@ rm talosctl-linux-amd64
 
 Before running Terraform, you need to configure the Proxmox server. SSH into your Proxmox host and run these commands.
 
-### 1. Create Terraform User and Role
+### 1. Create Resource Pool
+
+Create a resource pool to organize the Kubernetes VMs:
+
+```bash
+# Create a pool for Kubernetes resources
+pvesh create /pools --poolid k8s --comment "Kubernetes Talos Cluster"
+
+# Verify pool was created
+pvesh get /pools
+```
+
+### 2. Create Terraform User and Role
 
 ```bash
 # Create a dedicated role for Terraform with required privileges
-pveum role add TerraformRole -privs "Datastore.Allocate Datastore.AllocateSpace Datastore.AllocateTemplate Datastore.Audit Pool.Allocate Sys.Audit Sys.Console Sys.Modify SDN.Use VM.Allocate VM.Audit VM.Clone VM.Config.CDROM VM.Config.Cloudinit VM.Config.CPU VM.Config.Disk VM.Config.HWType VM.Config.Memory VM.Config.Network VM.Config.Options VM.Migrate VM.Monitor VM.PowerMgmt"
+pveum role add TerraformRole -privs "Datastore.Allocate Datastore.AllocateSpace Datastore.AllocateTemplate Datastore.Audit Pool.Allocate Pool.Audit Sys.Audit Sys.Console Sys.Modify SDN.Use VM.Allocate VM.Audit VM.Clone VM.Config.CDROM VM.Config.Cloudinit VM.Config.CPU VM.Config.Disk VM.Config.HWType VM.Config.Memory VM.Config.Network VM.Config.Options VM.Migrate VM.Monitor VM.PowerMgmt"
 
 # Create the terraform user
 pveum user add terraform@pve --password <YOUR_PASSWORD>
 
 # Assign the role to the user on the root path (/) for full access
 pveum aclmod / -user terraform@pve -role TerraformRole
+
+# Also grant access to the k8s pool specifically
+pveum aclmod /pool/k8s -user terraform@pve -role TerraformRole
 ```
 
-### 2. Alternative: Create API Token (Recommended)
+### 3. Alternative: Create API Token (Recommended)
 
 Using an API token is more secure than password authentication:
 

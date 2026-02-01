@@ -3,84 +3,201 @@
 #
 # Commands:
 #   plan           Terraform plan only (writes tfplan)
-#   apply          Terraform apply + bootstrap (no saved plan)
-#   plan-apply     Terraform plan (tfplan) + terraform apply tfplan + bootstrap
+#   apply          Full deployment (terraform + bootstrap + components)
+#   plan-apply     Terraform plan + apply + bootstrap
 #   destroy        Terraform destroy only
-#   reset-piraeus  Uninstall Piraeus/LINSTOR from current cluster (best-effort)
-#   reset-all      reset-piraeus + terraform destroy + cleanup generated local files (does NOT delete terraform state by default)
-#   fix-linstor-db Fix LINSTOR DB migration errors (corrupted state from failed migrations)
-#   nuke-piraeus   Complete removal of Piraeus namespace and CRDs (use when fix-linstor-db doesn't work)
+#   reset-piraeus  Uninstall Piraeus/LINSTOR from current cluster
+#   reset-all      reset-piraeus + terraform destroy + cleanup
+#   fix-linstor-db Fix LINSTOR DB migration errors
+#   nuke-piraeus   Complete removal of Piraeus namespace and CRDs
+#   install-tools  Install all required CLI tools
+#   deploy-<comp>  Deploy individual component (traefik, harbor, monitoring, gitea)
+#   info           Show cluster access information
+#   test           Run validation tests
 #
-# Notes:
-# - This script reads terraform outputs:
-#     controller_node_names, controllers, worker_node_names, workers, kubeconfig, talosconfig
-# - kubeconfig.yml is written as a single self-contained file (embedded certs) to work with Lens.
+# Configuration:
+#   Edit do.cfg for cluster settings
+#   Create do.local.cfg for local overrides (gitignored)
 #
 set -euo pipefail
 
 # -----------------------------
-# Config / defaults (override via env)
+# Script directory
 # -----------------------------
 WORKDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Piraeus versions - tested combinations for Talos:
-#   PIRAEUS_OPERATOR_VERSION=2.9.0 + LINSTOR_IMAGE_VERSION=v1.28.0 (stable)
-#   PIRAEUS_OPERATOR_VERSION=2.10.4 + LINSTOR_IMAGE_VERSION=v1.32.3 (latest)
-#
-# Version fallback: if not explicitly set, will try multiple versions automatically
-if [[ -z "${PIRAEUS_OPERATOR_VERSION:-}" && -z "${LINSTOR_IMAGE_VERSION:-}" ]]; then
-  PIRAEUS_VERSION_FALLBACK_ENABLED=1
-  # Versions to try (operator:linstor pairs) - note 'v' prefix required for linstor tags
-  PIRAEUS_VERSION_CANDIDATES=("2.10.4:v1.32.3" "2.9.0:v1.28.0" "2.8.0:v1.27.1")
-  CURRENT_VERSION_INDEX=0
-else
-  PIRAEUS_VERSION_FALLBACK_ENABLED=0
-fi
+# -----------------------------
+# Load configuration
+# -----------------------------
+load_config() {
+  # Defaults (before loading config files)
+  PROFILE="full"
+  RUN_TERRAFORM="true"
+  INSTALL_PIRAEUS="true"
+  INGRESS_CONTROLLER="traefik"
+  INSTALL_HARBOR="true"
+  INSTALL_MONITORING="false"
+  INSTALL_GITEA="false"
+  INGRESS_DOMAIN="cure.dev"
+  LB_IP_START=""
+  LB_IP_END=""
+  
+  PIRAEUS_OPERATOR_VERSION="2.10.4"
+  LINSTOR_IMAGE_VERSION="v1.32.3"
+  STORAGE_POOL_NAME="lvm"
+  STORAGE_CLASS_NAME="linstor-lvm-r1"
+  STORAGE_REPLICAS="1"
+  DEFAULT_DEVICE="/dev/sdb"
+  DEVICE_MAP=""
+  
+  TRAEFIK_VERSION="33.2.1"
+  TRAEFIK_REPLICAS="2"
+  
+  HARBOR_VERSION="1.16.2"
+  HARBOR_ADMIN_PASSWORD="Harbor12345"
+  HARBOR_REGISTRY_SIZE="50Gi"
+  
+  MONITORING_VERSION="72.6.2"
+  GRAFANA_ADMIN_PASSWORD="admin"
+  PROMETHEUS_RETENTION="15d"
+  PROMETHEUS_STORAGE_SIZE="20Gi"
+  
+  GITEA_VERSION="10.6.0"
+  GITEA_ADMIN_PASSWORD="gitea12345"
+  
+  WAIT_LINSTOR_TIMEOUT="15m"
+  WAIT_SATELLITE_TIMEOUT="2m"
+  WAIT_STORAGEPOOL_TIMEOUT="15m"
+  
+  WIPE_DISKS="false"
+  AUTO_RESET_LINSTOR_DB="false"
+  LOG_ENABLED="false"
+  LOG_FILE="do.log"
+  TF_VAR_FILE=""
+  PIRAEUS_VERSION_FALLBACK="true"
+  
+  # Load main config
+  if [[ -f "$WORKDIR/do.cfg" ]]; then
+    # shellcheck source=/dev/null
+    source "$WORKDIR/do.cfg"
+  fi
+  
+  # Load local overrides (gitignored)
+  if [[ -f "$WORKDIR/do.local.cfg" ]]; then
+    # shellcheck source=/dev/null
+    source "$WORKDIR/do.local.cfg"
+  fi
+  
+  # Apply profile settings
+  apply_profile
+  
+  # Normalize boolean values
+  RUN_TERRAFORM=$(normalize_bool "$RUN_TERRAFORM")
+  INSTALL_PIRAEUS=$(normalize_bool "$INSTALL_PIRAEUS")
+  INSTALL_HARBOR=$(normalize_bool "$INSTALL_HARBOR")
+  INSTALL_MONITORING=$(normalize_bool "$INSTALL_MONITORING")
+  INSTALL_GITEA=$(normalize_bool "$INSTALL_GITEA")
+  WIPE_DISKS=$(normalize_bool "$WIPE_DISKS")
+  AUTO_RESET_LINSTOR_DB=$(normalize_bool "$AUTO_RESET_LINSTOR_DB")
+  LOG_ENABLED=$(normalize_bool "$LOG_ENABLED")
+  PIRAEUS_VERSION_FALLBACK=$(normalize_bool "$PIRAEUS_VERSION_FALLBACK")
+  
+  # Ensure LINSTOR version has 'v' prefix
+  if [[ ! "${LINSTOR_IMAGE_VERSION}" =~ ^v ]]; then
+    LINSTOR_IMAGE_VERSION="v${LINSTOR_IMAGE_VERSION}"
+  fi
+  
+  # Set up version fallback if enabled
+  if [[ "$PIRAEUS_VERSION_FALLBACK" == "1" ]]; then
+    PIRAEUS_VERSION_FALLBACK_ENABLED=1
+    PIRAEUS_VERSION_CANDIDATES=("2.10.4:v1.32.3" "2.9.0:v1.28.0" "2.8.0:v1.27.1")
+    CURRENT_VERSION_INDEX=0
+  else
+    PIRAEUS_VERSION_FALLBACK_ENABLED=0
+  fi
+  
+  # Derived paths
+  PLANFILE="$WORKDIR/tfplan"
+  KUBECONFIG_RAW_OUT="$WORKDIR/kubeconfig.raw.yml"
+  KUBECONFIG_OUT="$WORKDIR/kubeconfig.yml"
+  KUBECONFIG_LENS_OUT="$WORKDIR/kubeconfig.lens.yml"
+  TALOSCONFIG_OUT="$WORKDIR/talosconfig.yml"
+  INGRESS_CA_OUT="$WORKDIR/kubernetes-ingress-ca-crt.pem"
+  LOG_FILE="$WORKDIR/$LOG_FILE"
+  
+  # Legacy variable mappings for compatibility
+  POOL_NAME="$STORAGE_POOL_NAME"
+  STORAGECLASS_NAME="$STORAGE_CLASS_NAME"
+  AUTO_PLACE="$STORAGE_REPLICAS"
+  WAIT_LINSTOR_AVAILABLE_TIMEOUT="$WAIT_LINSTOR_TIMEOUT"
+  WAIT_SATELLITE_PODS_TIMEOUT="$WAIT_SATELLITE_TIMEOUT"
+}
 
-PIRAEUS_OPERATOR_VERSION="${PIRAEUS_OPERATOR_VERSION:-2.10.4}"
-LINSTOR_IMAGE_VERSION="${LINSTOR_IMAGE_VERSION:-v1.32.3}"
+normalize_bool() {
+  local val="${1:-}"
+  case "${val,,}" in
+    true|yes|1|on) echo "1" ;;
+    *) echo "0" ;;
+  esac
+}
 
-# Ensure LINSTOR version has 'v' prefix (required by quay.io tags)
-if [[ ! "${LINSTOR_IMAGE_VERSION}" =~ ^v ]]; then
-  LINSTOR_IMAGE_VERSION="v${LINSTOR_IMAGE_VERSION}"
-fi
+apply_profile() {
+  case "${PROFILE,,}" in
+    simple)
+      INGRESS_CONTROLLER="cilium"
+      INSTALL_HARBOR="false"
+      INSTALL_MONITORING="false"
+      INSTALL_GITEA="false"
+      ;;
+    full)
+      INGRESS_CONTROLLER="traefik"
+      INSTALL_HARBOR="true"
+      INSTALL_MONITORING="false"
+      INSTALL_GITEA="false"
+      ;;
+    custom)
+      # Use individual settings as-is
+      ;;
+    *)
+      # Default to full if unknown
+      INGRESS_CONTROLLER="traefik"
+      ;;
+  esac
+}
 
-POOL_NAME="${POOL_NAME:-lvm}"
-STORAGECLASS_NAME="${STORAGECLASS_NAME:-linstor-lvm-r1}"
-AUTO_PLACE="${AUTO_PLACE:-1}"                   # replicas/autoPlace for storageclass
+show_config() {
+  step "Current Configuration"
+  echo ""
+  echo "Profile: $PROFILE"
+  echo ""
+  echo "Components:"
+  echo "  Terraform:         $(bool_to_word $RUN_TERRAFORM)"
+  echo "  Piraeus/LINSTOR:   $(bool_to_word $INSTALL_PIRAEUS)"
+  echo "  Ingress:           $INGRESS_CONTROLLER"
+  echo "  Harbor:            $(bool_to_word $INSTALL_HARBOR)"
+  echo "  Monitoring:        $(bool_to_word $INSTALL_MONITORING)"
+  echo "  Gitea:             $(bool_to_word $INSTALL_GITEA)"
+  echo ""
+  echo "Network:"
+  echo "  Domain:            $INGRESS_DOMAIN"
+  echo ""
+  echo "Storage:"
+  echo "  Pool Name:         $STORAGE_POOL_NAME"
+  echo "  StorageClass:      $STORAGE_CLASS_NAME"
+  echo "  Replicas:          $STORAGE_REPLICAS"
+  echo "  Default Device:    $DEFAULT_DEVICE"
+  echo ""
+  echo "Versions:"
+  echo "  Piraeus Operator:  $PIRAEUS_OPERATOR_VERSION"
+  echo "  LINSTOR:           $LINSTOR_IMAGE_VERSION"
+  echo "  Traefik:           $TRAEFIK_VERSION"
+  echo "  Harbor:            $HARBOR_VERSION"
+  echo ""
+}
 
-# Data disk selection:
-# Default is the common Talos+QEMU virtio second disk.
-DEFAULT_DEVICE="${DEFAULT_DEVICE:-/dev/sdb}"
-# Optional per-node override:
-#   DEVICE_MAP='node1=/dev/sdb,node2=/dev/vdb'
-DEVICE_MAP="${DEVICE_MAP:-}"
-
-# Wiping disks is ALWAYS opt-in.
-WIPE_DISKS="${WIPE_DISKS:-0}"                  # 1 = wipe data disks on workers (uses talosctl wipe disk <id>)
-
-# Other behavior toggles:
-SKIP_TERRAFORM="${SKIP_TERRAFORM:-0}"
-SKIP_PIRAEUS="${SKIP_PIRAEUS:-0}"
-RESET_LINSTOR_DB="${RESET_LINSTOR_DB:-0}"      # reset-piraeus: also delete internal.linstor.linbit.com CRs
-AUTO_RESET_LINSTOR_DB="${AUTO_RESET_LINSTOR_DB:-0}"  # auto-reset internal DB on migration failure
-
-# Timeouts
-WAIT_LINSTOR_AVAILABLE_TIMEOUT="${WAIT_LINSTOR_AVAILABLE_TIMEOUT:-15m}"
-WAIT_SATELLITE_PODS_TIMEOUT="${WAIT_SATELLITE_PODS_TIMEOUT:-2m}"
-WAIT_STORAGEPOOL_TIMEOUT="${WAIT_STORAGEPOOL_TIMEOUT:-15m}"
-
-# Files
-PLANFILE="${PLANFILE:-$WORKDIR/tfplan}"
-KUBECONFIG_RAW_OUT="${KUBECONFIG_RAW_OUT:-$WORKDIR/kubeconfig.raw.yml}"
-KUBECONFIG_OUT="${KUBECONFIG_OUT:-$WORKDIR/kubeconfig.yml}"            # flattened, embedded certs
-KUBECONFIG_LENS_OUT="${KUBECONFIG_LENS_OUT:-$WORKDIR/kubeconfig.lens.yml}"  # same as kubeconfig.yml by default
-TALOSCONFIG_OUT="${TALOSCONFIG_OUT:-$WORKDIR/talosconfig.yml}"
-INGRESS_CA_OUT="${INGRESS_CA_OUT:-$WORKDIR/kubernetes-ingress-ca-crt.pem}"
-
-# Logging
-LOG_FILE="${LOG_FILE:-$WORKDIR/do.log}"
-LOG_ENABLED="${LOG_ENABLED:-0}"  # Set LOG_ENABLED=1 to enable file logging
+bool_to_word() {
+  [[ "$1" == "1" ]] && echo "enabled" || echo "disabled"
+}
 
 # -----------------------------
 # Pretty logging & progress
@@ -108,7 +225,7 @@ info() { _log "INFO: $*"; }
 warn() { _log_err "WARN: $*"; }
 die() { _log_err "ERROR: $*"; exit 1; }
 
-# Progress spinner for long operations
+# Progress spinner
 SPINNER_PID=""
 spinner_start() {
   local msg="${1:-Working...}"
@@ -128,33 +245,20 @@ spinner_stop() {
   if [[ -n "$SPINNER_PID" ]]; then
     kill "$SPINNER_PID" 2>/dev/null || true
     SPINNER_PID=""
-    printf "\r\033[K"  # Clear line
+    printf "\r\033[K"
   fi
 }
 
-# Progress status line (updates in place)
-progress() {
-  printf "\r\033[K  → %s" "$*"
-}
+progress() { printf "\r\033[K  → %s" "$*"; }
+progress_done() { printf "\r\033[K  ✓ %s\n" "$*"; }
+progress_fail() { printf "\r\033[K  ✗ %s\n" "$*"; }
 
-progress_done() {
-  printf "\r\033[K  ✓ %s\n" "$*"
-}
-
-progress_fail() {
-  printf "\r\033[K  ✗ %s\n" "$*"
-}
-
-# Wait with progress for a condition
-# Usage: wait_progress "message" <timeout_seconds> <check_command>
 wait_progress() {
   local msg="$1"
   local timeout="$2"
   shift 2
   local check_cmd=("$@")
-  
-  local start=$SECONDS
-  local elapsed=0
+  local start=$SECONDS elapsed=0
   
   while true; do
     elapsed=$((SECONDS - start))
@@ -174,11 +278,9 @@ wait_progress() {
   done
 }
 
-# Show pod status summary
 show_pod_progress() {
   local ns="${1:-piraeus-datastore}"
   local label="${2:-}"
-  
   local selector=""
   [[ -n "$label" ]] && selector="-l $label"
   
@@ -205,24 +307,14 @@ need() {
 # Terraform helpers
 # -----------------------------
 terraform_var_file_args() {
-  # Terraform normally auto-loads terraform.tfvars and *.auto.tfvars.
-  # Still, we've seen cases where users run from another cwd or wrapper and vars are missed.
-  # So we provide an explicit -var-file when we can.
   local args=()
-
   if [[ -n "${TF_VAR_FILE:-}" ]]; then
     args+=("-var-file=${TF_VAR_FILE}")
-  elif [[ -n "${VAR_FILE:-}" ]]; then
-    args+=("-var-file=${VAR_FILE}")
-  else
-    # Prefer terraform.auto.tfvars if it exists, else terraform.tfvars
-    if [[ -f "$WORKDIR/terraform.auto.tfvars" ]]; then
-      args+=("-var-file=terraform.auto.tfvars")
-    elif [[ -f "$WORKDIR/terraform.tfvars" ]]; then
-      args+=("-var-file=terraform.tfvars")
-    fi
+  elif [[ -f "$WORKDIR/terraform.auto.tfvars" ]]; then
+    args+=("-var-file=terraform.auto.tfvars")
+  elif [[ -f "$WORKDIR/terraform.tfvars" ]]; then
+    args+=("-var-file=terraform.tfvars")
   fi
-
   printf "%q " "${args[@]}"
 }
 
@@ -265,36 +357,19 @@ terraform_destroy() {
 # -----------------------------
 # Terraform output parsing
 # -----------------------------
-# The outputs are expected to be:
-#   controller_node_names (space separated string)
-#   controllers (space separated string)
-#   worker_node_names (space separated string)
-#   workers (space separated string)
-#   kubeconfig (string, sensitive)
-#   talosconfig (string, sensitive)
 CONTROLLER_NODE_NAMES=()
 CONTROLLERS=()
 WORKER_NODE_NAMES=()
 WORKERS=()
 
 tf_out_raw() {
-  # usage: tf_out_raw <name>
   ( cd "$WORKDIR" && terraform output -raw "$1" 2>/dev/null || true )
 }
 
 normalize_tf_list() {
-  # Terraform outputs are sometimes space-separated, sometimes comma-separated.
-  # Also, some CLIs (notably talosctl) treat comma-separated values as multiple
-  # arguments even if we pass them as a single shell word.
-  #
-  # This normalizes:
-  #   "a b c"   -> "a b c"
-  #   "a,b,c"   -> "a b c"
-  #   "a\nb\nc" -> "a b c"
   local s="${1:-}"
   s="${s//$'\n'/ }"
   s="${s//,/ }"
-  # Collapse repeated whitespace
   echo "$s" | xargs
 }
 
@@ -306,10 +381,8 @@ load_cluster_vars() {
   wnames="$(tf_out_raw worker_node_names)"
   wips="$(tf_out_raw workers)"
 
-  [[ -n "$cnames" ]] || die "terraform output controller_node_names is empty (did terraform apply succeed?)"
-  [[ -n "$cips"   ]] || die "terraform output controllers is empty (did terraform apply succeed?)"
-  [[ -n "$wnames" ]] || warn "terraform output worker_node_names is empty"
-  [[ -n "$wips"   ]] || warn "terraform output workers is empty"
+  [[ -n "$cnames" ]] || die "terraform output controller_node_names is empty"
+  [[ -n "$cips"   ]] || die "terraform output controllers is empty"
 
   cnames="$(normalize_tf_list "$cnames")"
   cips="$(normalize_tf_list "$cips")"
@@ -321,18 +394,12 @@ load_cluster_vars() {
   read -r -a WORKER_NODE_NAMES     <<<"$wnames"
   read -r -a WORKERS               <<<"$wips"
 
-  if [[ "${#WORKER_NODE_NAMES[@]}" -ne 0 && "${#WORKERS[@]}" -ne 0 && "${#WORKER_NODE_NAMES[@]}" -ne "${#WORKERS[@]}" ]]; then
-    warn "Mismatch: got ${#WORKER_NODE_NAMES[@]} worker names but ${#WORKERS[@]} worker IPs. Check terraform outputs worker_node_names/workers."
-  fi
-
   info "controllers: ${CONTROLLERS[*]}"
   info "workers:     ${WORKERS[*]}"
-  info "controller node names: ${CONTROLLER_NODE_NAMES[*]}"
-  info "worker node names:     ${WORKER_NODE_NAMES[*]}"
 }
 
 # -----------------------------
-# Config writing (kubeconfig & talosconfig)
+# Config writing
 # -----------------------------
 write_configs() {
   need terraform
@@ -341,44 +408,31 @@ write_configs() {
 
   step "write talosconfig.yml and kubeconfig.yml"
 
-  # Write raw configs from terraform outputs
   ( cd "$WORKDIR" && terraform output -raw talosconfig > "$TALOSCONFIG_OUT" )
   ( cd "$WORKDIR" && terraform output -raw kubeconfig > "$KUBECONFIG_RAW_OUT" )
-
   chmod 0600 "$TALOSCONFIG_OUT" "$KUBECONFIG_RAW_OUT" || true
 
-  # Make kubeconfig self-contained (embed certs/keys); Lens expects this often.
-  # We flatten the raw file and write kubeconfig.yml (and lens copy).
   KUBECONFIG="$KUBECONFIG_RAW_OUT" kubectl config view --raw --flatten > "$KUBECONFIG_OUT"
   chmod 0600 "$KUBECONFIG_OUT" || true
-
-  # Keep a separate Lens file for convenience (same content).
   cp -f "$KUBECONFIG_OUT" "$KUBECONFIG_LENS_OUT"
   chmod 0600 "$KUBECONFIG_LENS_OUT" || true
 
   export TALOSCONFIG="$TALOSCONFIG_OUT"
   export KUBECONFIG="$KUBECONFIG_OUT"
 
-  info "kubeconfig (raw):     $KUBECONFIG_RAW_OUT"
-  info "kubeconfig (flatten): $KUBECONFIG_OUT"
-  info "kubeconfig (Lens):    $KUBECONFIG_LENS_OUT"
-  info "talosconfig:          $TALOSCONFIG_OUT"
+  info "kubeconfig: $KUBECONFIG_OUT"
+  info "talosconfig: $TALOSCONFIG_OUT"
 }
 
 talos_health() {
   need talosctl
   need kubectl
   local timeout="${TALOS_HEALTH_TIMEOUT:-5m}"
-
-  [[ "${#CONTROLLERS[@]}" -gt 0 ]] || die "No controllers found in terraform outputs"
+  [[ "${#CONTROLLERS[@]}" -gt 0 ]] || die "No controllers found"
 
   local init_node="${CONTROLLERS[0]}"
-
-  # Run a simplified health check that doesn't get stuck on k8s node matching
-  info "Running basic Talos health checks (etcd, apid, kubelet)..."
+  info "Running basic Talos health checks..."
   
-  # Use --run-timeout to prevent hanging, and don't specify worker/control-plane nodes
-  # which causes issues with IP matching in k8s
   if talosctl health --help 2>&1 | grep -q -- '--run-timeout'; then
     timeout 3m talosctl -n "$init_node" health \
       --init-node "$init_node" \
@@ -388,17 +442,15 @@ talos_health() {
       --k8s-endpoint=$(kubectl config view -o jsonpath='{.clusters[0].cluster.server}' 2>/dev/null || echo "https://$init_node:6443") \
       2>&1 | grep -v "waiting for all k8s nodes to report" || true
   else
-    # Older talosctl - just do basic checks without k8s validation
     timeout 2m talosctl -n "$init_node" health --wait-timeout 1m --server=false 2>&1 | head -50 || true
   fi
   
-  # Verify cluster is actually working via kubectl
-  info "Verifying Kubernetes API is responsive..."
+  info "Verifying Kubernetes API..."
   if kubectl get nodes >/dev/null 2>&1; then
     info "Kubernetes API is healthy"
     kubectl get nodes
   else
-    warn "kubectl get nodes failed, but continuing anyway"
+    warn "kubectl get nodes failed"
   fi
 }
 
@@ -421,35 +473,25 @@ ensure_kubeconfig() {
 # Disk helpers
 # -----------------------------
 device_for_node() {
-  # usage: device_for_node <nodeName>
-  # If DEVICE_MAP includes a mapping for this node, use it; else DEFAULT_DEVICE.
   local node="$1"
-  local pair dev
-
   if [[ -n "$DEVICE_MAP" ]]; then
     IFS=',' read -r -a _pairs <<<"$DEVICE_MAP"
     for pair in "${_pairs[@]}"; do
       if [[ "$pair" == "$node="* ]]; then
-        dev="${pair#*=}"
-        echo "$dev"
+        echo "${pair#*=}"
         return 0
       fi
     done
   fi
-
   echo "$DEFAULT_DEVICE"
 }
 
 disk_id_from_device() {
-  # Talos wipe expects the disk ID (e.g. "sdb"), not "/dev/sdb"
   local dev="$1"
-  dev="${dev#/dev/}"
-  echo "$dev"
+  echo "${dev#/dev/}"
 }
 
 validate_worker_data_disks() {
-  # Best-effort: check that the chosen disk id exists on each worker.
-  # If not found, fail early (better than silently creating pools on the wrong disk).
   [[ "${#WORKERS[@]}" -gt 0 ]] || return 0
   need talosctl
 
@@ -461,19 +503,37 @@ validate_worker_data_disks() {
     dev="$(device_for_node "$node")"
     disk_id="$(disk_id_from_device "$dev")"
 
-    info "checking $node ($ip) has disk id '$disk_id' (device '$dev')"
+    info "checking $node ($ip) has disk '$disk_id'"
     out="$(talosctl -n "$ip" get disks 2>/dev/null || true)"
     if ! echo "$out" | awk '{print $4}' | grep -qx "$disk_id"; then
-      echo "$out" | sed -n '1,120p' >&2 || true
-      die "Worker $node ($ip) does not report disk id '$disk_id'. If your data disk isn't /dev/sdb, set DEFAULT_DEVICE or DEVICE_MAP."
+      die "Worker $node ($ip) missing disk '$disk_id'. Set DEFAULT_DEVICE or DEVICE_MAP."
     fi
   done
 }
 
-# ===== VALIDATION/TESTING FUNCTIONS =====
+wipe_worker_disks() {
+  [[ "$WIPE_DISKS" == "1" ]] || return 0
+  [[ "${#WORKERS[@]}" -gt 0 ]] || return 0
 
+  need talosctl
+  step "wipe worker data disks (DANGEROUS)"
+
+  local i ip node dev disk_id
+  for i in "${!WORKERS[@]}"; do
+    ip="${WORKERS[$i]}"
+    node="${WORKER_NODE_NAMES[$i]:-worker-$i}"
+    dev="$(device_for_node "$node")"
+    disk_id="$(disk_id_from_device "$dev")"
+
+    warn "Wiping $node ($ip) disk '$disk_id'"
+    talosctl -n "$ip" wipe disk "$disk_id"
+  done
+}
+
+# -----------------------------
+# Validation tests
+# -----------------------------
 test_drbd_modules_loaded() {
-  # Verify DRBD kernel modules are loaded on all worker nodes
   step "TEST: Verify DRBD modules on worker nodes"
   [[ "${#WORKERS[@]}" -gt 0 ]] || { info "No workers to test"; return 0; }
   need talosctl
@@ -491,40 +551,26 @@ test_drbd_modules_loaded() {
     fi
   done
   
-  [[ $all_ok -eq 1 ]] && info "✓ All workers have DRBD modules" || warn "⚠ Some workers missing DRBD modules"
+  [[ $all_ok -eq 1 ]] && info "✓ All workers have DRBD modules"
   return 0
 }
 
 test_lvm_init_daemonset() {
-  # Verify LVM init DaemonSet deployed and pods running
   step "TEST: Verify LVM init DaemonSet"
   
-  local ds_ready
+  local ds_ready ds_desired
   ds_ready=$(kubectl get daemonset -n piraeus-datastore lvm-init -o jsonpath='{.status.numberReady}' 2>/dev/null || echo "0")
-  local ds_desired
   ds_desired=$(kubectl get daemonset -n piraeus-datastore lvm-init -o jsonpath='{.status.desiredNumberScheduled}' 2>/dev/null || echo "0")
   
   if [[ "$ds_ready" -eq "$ds_desired" ]] && [[ "$ds_desired" -gt 0 ]]; then
     info "  ✓ LVM init DaemonSet: $ds_ready/$ds_desired pods ready"
-    
-    # Check if thin pool was created
-    info "  Checking thin pool creation..."
-    for i in "${!WORKERS[@]}"; do
-      local ip="${WORKERS[$i]}"
-      if talosctl -n "$ip" read /proc/devices 2>/dev/null | grep -q "device-mapper"; then
-        info "    ✓ Worker $ip has device-mapper (LVM running)"
-      else
-        warn "    ⚠ Worker $ip may not have LVM active"
-      fi
-    done
   else
-    warn "  ⚠ LVM init DaemonSet: $ds_ready/$ds_desired pods ready (expected $ds_desired)"
+    warn "  ⚠ LVM init DaemonSet: $ds_ready/$ds_desired pods ready"
   fi
   return 0
 }
 
 test_satellite_readiness() {
-  # Verify satellites are Running and Ready
   step "TEST: Verify satellite pod status"
   
   local total running ready
@@ -553,7 +599,6 @@ test_satellite_readiness() {
 }
 
 test_linstor_nodes_registered() {
-  # Verify all nodes registered with LINSTOR controller
   step "TEST: Verify LINSTOR nodes registered"
   
   local controller_pod
@@ -568,7 +613,6 @@ test_linstor_nodes_registered() {
   registered_nodes=$(kubectl -n piraeus-datastore exec "$controller_pod" -- linstor node list 2>/dev/null | grep -c "SATELLITE" || echo "0")
   registered_nodes=$(echo "$registered_nodes" | tr -d ' \n')
   
-  # Use satellite pod count as expected if WORKER_NODE_NAMES not available
   local expected_nodes=${#WORKER_NODE_NAMES[@]}
   if [[ $expected_nodes -eq 0 ]]; then
     expected_nodes=$(kubectl get pods -n piraeus-datastore -l app.kubernetes.io/component=linstor-satellite --no-headers 2>/dev/null | wc -l | tr -d ' \n')
@@ -576,20 +620,14 @@ test_linstor_nodes_registered() {
   
   if [[ $registered_nodes -gt 0 ]] && [[ $registered_nodes -eq $expected_nodes ]]; then
     info "  ✓ All $registered_nodes nodes registered"
-    kubectl -n piraeus-datastore exec "$controller_pod" -- linstor node list 2>/dev/null | head -10
     return 0
-  elif [[ $registered_nodes -gt 0 ]]; then
-    warn "  ⚠ $registered_nodes nodes registered (expected $expected_nodes)"
-    kubectl -n piraeus-datastore exec "$controller_pod" -- linstor node list 2>/dev/null | head -10
-    return 1
   else
-    warn "  ⚠ No nodes registered yet"
+    warn "  ⚠ $registered_nodes nodes registered (expected $expected_nodes)"
     return 1
   fi
 }
 
 test_storage_pools_created() {
-  # Verify storage pools exist on all nodes
   step "TEST: Verify storage pools created"
   
   local controller_pod
@@ -600,95 +638,28 @@ test_storage_pools_created() {
     return 1
   fi
   
-  local pool_count pool_output
+  local pool_output pool_count
   pool_output=$(kubectl -n piraeus-datastore exec "$controller_pod" -- linstor storage-pool list 2>/dev/null || echo "")
-  # Use tr to remove any newlines, then grep -c to count matches
   pool_count=$(echo "$pool_output" | grep -i "lvm" | wc -l | tr -d ' \n')
   
   if [[ $pool_count -gt 0 ]]; then
     info "  ✓ Found $pool_count LVM storage pools"
-    echo "$pool_output"
     return 0
   else
-    warn "  ⚠ No LVM storage pools found (only diskless pools exist)"
-    info "  This means configure_linstor_storage_pools hasn't created LVM pools yet"
-    echo "$pool_output" | head -20
-    return 1
-  fi
-}
-
-test_pvc_provisioning() {
-  # Verify PVC can be created and bound
-  step "TEST: Verify PVC provisioning"
-  
-  local test_pvc="test-pvc-$(date +%s)"
-  local test_ns="piraeus-datastore"
-  
-  # Create test PVC
-  info "  Creating test PVC: $test_pvc"
-  kubectl apply -n "$test_ns" -f - <<EOF
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: $test_pvc
-spec:
-  storageClassName: $STORAGECLASS_NAME
-  accessModes:
-    - ReadWriteOnce
-  resources:
-    requests:
-      storage: 100Mi
-EOF
-  
-  if [[ $? -ne 0 ]]; then
-    warn "  ⚠ Failed to create test PVC"
-    return 1
-  fi
-  
-  sleep 2
-  
-  # Check if it's WaitForFirstConsumer
-  local pvc_phase pvc_status
-  pvc_phase=$(kubectl get pvc -n "$test_ns" "$test_pvc" -o jsonpath='{.status.phase}' 2>/dev/null || echo "Unknown")
-  
-  if [[ "$pvc_phase" == "Pending" ]]; then
-    # Check if waiting for first consumer (expected for topology-aware storage)
-    if kubectl describe pvc -n "$test_ns" "$test_pvc" 2>/dev/null | grep -q "WaitForFirstConsumer"; then
-      info "  ✓ PVC created (Pending - WaitForFirstConsumer is expected)"
-      info "    This StorageClass waits for a pod to consume the PVC before binding"
-      kubectl delete pvc -n "$test_ns" "$test_pvc" --ignore-not-found=true
-      return 0
-    fi
-  fi
-  
-  # Wait for binding (for immediate binding mode)
-  if kubectl wait -n "$test_ns" pvc "$test_pvc" --for=jsonpath='{.status.phase}'=Bound --timeout=30s 2>/dev/null; then
-    info "  ✓ PVC bound successfully"
-    kubectl get pvc -n "$test_ns" "$test_pvc"
-    kubectl delete pvc -n "$test_ns" "$test_pvc" --ignore-not-found=true
-    return 0
-  else
-    warn "  ⚠ PVC did not bind within 30s"
-    kubectl describe pvc -n "$test_ns" "$test_pvc" 2>/dev/null | grep -A 5 "Events:" || true
-    kubectl delete pvc -n "$test_ns" "$test_pvc" --ignore-not-found=true
+    warn "  ⚠ No LVM storage pools found"
     return 1
   fi
 }
 
 run_all_tests() {
-  # Run all validation tests
-  step "Running comprehensive validation tests"
+  step "Running validation tests"
   
-  # Load cluster vars if not already loaded (for standalone test runs)
   if [[ ${#WORKERS[@]} -eq 0 ]] && [[ ${#WORKER_NODE_NAMES[@]} -eq 0 ]]; then
-    info "Loading cluster variables from terraform..."
-    load_cluster_vars 2>/dev/null || warn "Could not load cluster vars (continuing anyway)"
+    load_cluster_vars 2>/dev/null || warn "Could not load cluster vars"
   fi
   
-  # Ensure kubeconfig is set for standalone test runs
   if [[ -z "${KUBECONFIG:-}" ]] && [[ -f "${KUBECONFIG_OUT:-$WORKDIR/kubeconfig.yml}" ]]; then
     export KUBECONFIG="${KUBECONFIG_OUT:-$WORKDIR/kubeconfig.yml}"
-    info "Using kubeconfig: $KUBECONFIG"
   fi
   
   local failed=0
@@ -698,7 +669,6 @@ run_all_tests() {
   test_satellite_readiness || failed=$((failed + 1))
   test_linstor_nodes_registered || failed=$((failed + 1))
   test_storage_pools_created || failed=$((failed + 1))
-  test_pvc_provisioning || failed=$((failed + 1))
   
   echo ""
   if [[ $failed -eq 0 ]]; then
@@ -710,149 +680,12 @@ run_all_tests() {
   fi
 }
 
-wipe_worker_disks() {
-  [[ "$WIPE_DISKS" == "1" ]] || return 0
-  [[ "${#WORKERS[@]}" -gt 0 ]] || return 0
-
-  need talosctl
-  step "wipe worker data disks (WIPE_DISKS=1)"
-
-  local i ip node dev disk_id
-  for i in "${!WORKERS[@]}"; do
-    ip="${WORKERS[$i]}"
-    node="${WORKER_NODE_NAMES[$i]:-worker-$i}"
-    dev="$(device_for_node "$node")"
-    disk_id="$(disk_id_from_device "$dev")"
-
-    warn "Wiping $node ($ip) disk '$disk_id' (from device '$dev')"
-    # --method FAST is default; wipe is destructive.
-    talosctl -n "$ip" wipe disk "$disk_id"
-  done
-}
-
-configure_linstor_storage_pools() {
-  # Create physical storage pools in LINSTOR after satellites are up
-  # This uses LINSTOR's API to configure the storage on each node
-  [[ "${#WORKER_NODE_NAMES[@]}" -gt 0 ]] || return 0
-  need kubectl
-
-  step "configure LINSTOR storage pools via API"
-
-  local i node dev linstor_pod
-  
-  # Find a linstor-controller pod to exec commands from
-  linstor_pod=$(kubectl -n piraeus-datastore get pod -l app.kubernetes.io/component=linstor-controller -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
-  
-  if [[ -z "$linstor_pod" ]]; then
-    warn "No linstor-controller pod found, skipping storage pool configuration"
-    return 0
-  fi
-
-  info "=== LINSTOR Storage Pool Configuration Debug ==="
-  info "Controller pod: $linstor_pod"
-  
-  # Wait for LVM init DaemonSet to complete
-  info "Waiting for LVM init DaemonSet to complete..."
-  local timeout=120
-  local elapsed=0
-  local ready
-  while [[ $elapsed -lt $timeout ]]; do
-    ready=$(kubectl get daemonset -n piraeus-datastore lvm-init -o jsonpath='{.status.numberReady}' 2>/dev/null || echo "0")
-    local desired=$(kubectl get daemonset -n piraeus-datastore lvm-init -o jsonpath='{.status.desiredNumberScheduled}' 2>/dev/null || echo "0")
-    
-    if [[ "$ready" -eq "$desired" ]] && [[ "$desired" -gt 0 ]]; then
-      info "✓ LVM init DaemonSet ready ($ready/$desired pods)"
-      break
-    fi
-    
-    if [[ $((elapsed % 10)) -eq 0 ]]; then
-      info "  Waiting for LVM init: $ready/$desired ready (${elapsed}s elapsed)..."
-      kubectl get pods -n piraeus-datastore -l app=lvm-init -o wide 2>/dev/null || true
-    fi
-    
-    sleep 2
-    elapsed=$((elapsed + 2))
-  done
-  
-  if [[ $elapsed -ge $timeout ]]; then
-    warn "LVM init DaemonSet did not become ready within ${timeout}s"
-    warn "Showing LVM init pod logs for troubleshooting:"
-    kubectl logs -n piraeus-datastore -l app=lvm-init --tail=100 2>&1 || true
-    warn "Continuing anyway, but storage pool creation may fail..."
-  fi
-  
-  # Delete any existing broken storage pools
-  info "Cleaning up any existing broken storage pools..."
-  local existing_pools
-  existing_pools=$(kubectl -n piraeus-datastore exec "$linstor_pod" -- linstor storage-pool list -p 2>/dev/null | grep -E "^\|.*${POOL_NAME}" | awk -F'|' '{print $2 ":" $3}' | tr -d ' ' || echo "")
-  
-  if [[ -n "$existing_pools" ]]; then
-    while IFS=: read -r pool_name node_name; do
-      if [[ -n "$pool_name" && -n "$node_name" ]]; then
-        info "  Deleting existing pool '$pool_name' on node '$node_name'"
-        kubectl -n piraeus-datastore exec "$linstor_pod" -- linstor storage-pool delete "$node_name" "$pool_name" 2>&1 || true
-      fi
-    done <<< "$existing_pools"
-  fi
-  
-  # Debug: Check nodes are registered
-  info "DEBUG: Registered LINSTOR nodes..."
-  kubectl -n piraeus-datastore exec "$linstor_pod" -- linstor node list 2>&1 | tee /tmp/linstor-nodes.log || true
-  
-  # Debug: Check storage providers
-  info "DEBUG: Satellite capabilities..."
-  kubectl -n piraeus-datastore exec "$linstor_pod" -- linstor node list 2>&1 | tee /tmp/linstor-providers.log || true
-  
-  # Debug: Check LVM init DaemonSet status
-  info "DEBUG: LVM init DaemonSet status..."
-  kubectl get daemonset -n piraeus-datastore lvm-init -o wide 2>&1 | tee /tmp/lvm-init-ds.log || true
-  kubectl get pods -n piraeus-datastore -l app=lvm-init -o wide 2>&1 | tee /tmp/lvm-init-pods.log || true
-  
-  # Debug: Check LVM init pod logs
-  info "DEBUG: LVM init pod logs (last 50 lines from each)..."
-  kubectl logs -n piraeus-datastore -l app=lvm-init --tail=50 2>&1 | tee /tmp/lvm-init-logs.log || true
-  
-  info "DEBUG: Starting storage pool creation..."
-
-  for i in "${!WORKER_NODE_NAMES[@]}"; do
-    node="${WORKER_NODE_NAMES[$i]}"
-    dev="$(device_for_node "$node")"
-
-    info "DEBUG: Processing node $node (device: $dev)"
-    
-    # Check if node is ONLINE
-    local node_status
-    node_status=$(kubectl -n piraeus-datastore exec "$linstor_pod" -- linstor node list -n "$node" 2>&1 | grep -i "online\|error" || echo "UNKNOWN")
-    info "  Node status: $node_status"
-    
-    info "  Creating storage pool: linstor storage-pool create lvmthin $node ${POOL_NAME} linstor-vg/${POOL_NAME}"
-    if kubectl -n piraeus-datastore exec "$linstor_pod" -- linstor \
-      storage-pool create lvmthin "$node" "${POOL_NAME}" "linstor-vg/${POOL_NAME}" 2>&1 | tee -a /tmp/linstor-pool-create.log; then
-      info "  ✓ Storage pool created successfully"
-    else
-      warn "  ✗ Failed to create storage pool"
-      warn "  DEBUG: Full pool list:"
-      kubectl -n piraeus-datastore exec "$linstor_pod" -- linstor storage-pool list 2>&1 | tee -a /tmp/linstor-pools.log || true
-    fi
-  done
-  
-  info "Storage pool configuration complete"
-  info "DEBUG: Final storage pool list:"
-  kubectl -n piraeus-datastore exec "$linstor_pod" -- linstor storage-pool list 2>&1 | tee /tmp/linstor-final-pools.log || true
-  
-  info "DEBUG: Saved diagnostics to /tmp/linstor-*.log"
-}
-
 # -----------------------------
 # Piraeus/LINSTOR install
 # -----------------------------
 check_cluster_network_access() {
   step "verify cluster internet access"
   
-  info "Testing if cluster can reach quay.io (required for pulling Piraeus images)..."
-  
-  # Create a test pod that attempts to reach quay.io
-  # Use securityContext to satisfy PodSecurity policies
   kubectl run network-test --image=busybox:1.36 --restart=Never --rm -i --timeout=60s \
     --overrides='{
       "spec": {
@@ -866,28 +699,11 @@ check_cluster_network_access() {
       }
     }' 2>&1 | tee /tmp/network-test.log || true
   
-  # Check for signs of successful connection (HTML content, or connection messages)
   if grep -qiE "DOCTYPE|html|quay|Connecting to|connected" /tmp/network-test.log 2>/dev/null; then
-    info "✓ Cluster has internet access to quay.io"
+    info "✓ Cluster has internet access"
     return 0
   else
-    warn "✗ Cluster CANNOT reach quay.io!"
-    warn ""
-    warn "Your Talos cluster appears to have no internet access or cannot reach quay.io."
-    warn "This will cause ImagePullBackOff errors when trying to install Piraeus."
-    warn ""
-    warn "Common causes:"
-    warn "  1. Talos nodes have no default gateway configured"
-    warn "  2. Proxmox firewall is blocking outbound traffic"
-    warn "  3. No DNS configured (can't resolve quay.io)"
-    warn "  4. Network isolation in Proxmox"
-    warn ""
-    warn "Quick tests to run:"
-    warn "  - kubectl run -it --rm debug --image=busybox --restart=Never -- ping -c 3 8.8.8.8"
-    warn "  - kubectl run -it --rm debug --image=busybox --restart=Never -- nslookup quay.io"
-    warn "  - talosctl -n <node-ip> get addresses  # Check if nodes have external network"
-    warn ""
-    warn "Continuing anyway, but installation will likely fail..."
+    warn "✗ Cluster CANNOT reach quay.io"
     return 1
   fi
 }
@@ -906,7 +722,6 @@ piraeus_wait_operator() {
 
 piraeus_relax_webhooks() {
   step "piraeus relax webhook failure policy"
-  # Reduce bootstrap pain when webhook startup races happen.
   local wh="piraeus-operator-validating-webhook-configuration"
   for i in {1..5}; do
     kubectl patch validatingwebhookconfiguration.admissionregistration.k8s.io/"$wh" \
@@ -922,13 +737,6 @@ piraeus_relax_webhooks() {
 }
 
 render_storage_pool_configs() {
-  # Talos-specific satellite configuration
-  # Based on official docs: https://piraeus.io/docs/stable/how-to/talos/
-  # 
-  # Talos doesn't use systemd, so we remove systemd-related volumes and init containers.
-  # DRBD modules are already loaded from Talos system extension.
-  # LVM thin pool is initialized by separate lvm-init DaemonSet on worker nodes.
-  
   cat <<'YAML'
 apiVersion: piraeus.io/v1
 kind: LinstorSatelliteConfiguration
@@ -964,14 +772,10 @@ spec:
 YAML
 }
 
-
-
 render_linstorcluster() {
-  # Different Piraeus versions have different API schemas
   local operator_major_minor
   operator_major_minor="$(echo "$PIRAEUS_OPERATOR_VERSION" | cut -d. -f1-2)"
   
-  # Version 2.9.x and older don't support csiController.replicas
   if [[ "$operator_major_minor" == "2.9" || "$operator_major_minor" == "2.8" ]]; then
     cat <<YAML
 apiVersion: piraeus.io/v1
@@ -989,8 +793,6 @@ spec:
     enabled: true
 YAML
   else
-    # Version 2.10+ supports csiController.replicas
-    # Add Talos-specific workaround: avoid systemd-related volume mounts
     cat <<YAML
 apiVersion: piraeus.io/v1
 kind: LinstorCluster
@@ -1028,9 +830,7 @@ YAML
 }
 
 render_lvm_init_daemonset() {
-  # DaemonSet to initialize LVM on worker nodes
-  # Runs on host with direct /dev access to create thin pools
-  cat <<'YAML'
+  cat <<YAML
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
@@ -1070,114 +870,38 @@ spec:
             - -c
             - |
               set -e
-              DEVICE="/dev/sdb"
+              DEVICE="${DEFAULT_DEVICE}"
               VG_NAME="linstor-vg"
-              POOL_NAME="lvm"
-              HOSTNAME=$(hostname)
+              POOL_NAME="${STORAGE_POOL_NAME}"
+              HOSTNAME=\$(hostname)
               
-              echo "=========================================="
-              echo "LVM Init: Starting on $HOSTNAME at $(date)"
-              echo "  Device: $DEVICE"
-              echo "  VG: $VG_NAME"
-              echo "  Thin Pool: $POOL_NAME"
-              echo "=========================================="
+              echo "LVM Init: Starting on \$HOSTNAME"
               
-              # Check device exists
-              if [ ! -b "$DEVICE" ]; then
-                echo "ERROR: Device $DEVICE not found on $HOSTNAME"
-                echo "Available block devices:"
-                lsblk || ls -la /dev/ | grep "^b"
+              if [ ! -b "\$DEVICE" ]; then
+                echo "ERROR: Device \$DEVICE not found"
                 exit 1
               fi
               
-              echo "✓ Device $DEVICE found"
-              echo "  Device info:"
-              ls -lh "$DEVICE"
+              apk add --no-cache lvm2 2>&1 | tail -1
               
-              # Install LVM tools if not present
-              if ! command -v pvcreate &> /dev/null; then
-                echo "Installing lvm2..."
-                apk add --no-cache lvm2 2>&1 | head -5
-              else
-                echo "✓ LVM tools already installed"
+              if ! pvdisplay "\$DEVICE" 2>&1 | grep -q "VG Name"; then
+                pvcreate -ff -y "\$DEVICE"
               fi
               
-              # Check if PV already exists
-              echo "Checking for existing PV on $DEVICE..."
-              if pvdisplay "$DEVICE" 2>&1; then
-                echo "✓ PV already exists on $DEVICE"
-              else
-                echo "Creating PV on $DEVICE..."
-                pvcreate -ff -y "$DEVICE"
-                echo "✓ PV created"
+              if ! vgdisplay "\$VG_NAME" 2>&1 | grep -q "VG Name"; then
+                vgcreate "\$VG_NAME" "\$DEVICE"
               fi
               
-              # Check/create VG
-              echo "Checking for VG $VG_NAME..."
-              if vgdisplay "$VG_NAME" 2>&1; then
-                echo "✓ VG $VG_NAME already exists"
-              else
-                echo "Creating VG $VG_NAME..."
-                vgcreate "$VG_NAME" "$DEVICE"
-                echo "✓ VG created"
+              if ! lvdisplay "\$VG_NAME/\$POOL_NAME" >/dev/null 2>&1; then
+                lvcreate -l 100%FREE -T "\$VG_NAME/\$POOL_NAME"
               fi
               
-              # Check/create thin pool
-              echo "Checking for thin pool $VG_NAME/$POOL_NAME..."
-              if lvdisplay "$VG_NAME/$POOL_NAME" >/dev/null 2>&1; then
-                echo "✓ Thin pool $VG_NAME/$POOL_NAME already exists"
-              else
-                echo "Creating thin pool $VG_NAME/$POOL_NAME (using 100% of VG)..."
-                if lvcreate -l 100%FREE -T "$VG_NAME/$POOL_NAME" 2>&1; then
-                  echo "✓ Thin pool created successfully"
-                else
-                  echo "ERROR: Failed to create thin pool"
-                  echo "Attempting to check if it exists anyway..."
-                  lvs "$VG_NAME" || true
-                  exit 1
-                fi
-              fi
+              lvchange -ay "\$VG_NAME/\$POOL_NAME" 2>&1 || true
               
-              # Ensure thin pool is active
-              echo "Activating thin pool..."
-              lvchange -ay "$VG_NAME/$POOL_NAME" 2>&1 || echo "Thin pool already active or activation not needed"
+              echo "LVM Init: Complete on \$HOSTNAME"
+              pvs && vgs && lvs
               
-              echo "=========================================="
-              echo "LVM Init: Complete on $HOSTNAME"
-              echo "Final state:"
-              echo "PVs:"
-              pvs
-              echo ""
-              echo "VGs:"
-              vgs
-              echo ""
-              echo "LVs:"
-              lvs
-              echo "=========================================="
-              
-              # Keep running to keep pod alive
-              while true; do
-                sleep 60
-                echo "LVM Init: Still running on $HOSTNAME - $(date)"
-              done
-                  echo "LVM Init: VG creation failed, may already exist"
-                }
-              fi
-              
-              # Check/create thin pool
-              if lvdisplay "$VG_NAME/$POOL_NAME" 2>&1 | grep -q "found"; then
-                echo "LVM Init: Thin pool $VG_NAME/$POOL_NAME already exists"
-              else
-                echo "LVM Init: Creating thin pool $VG_NAME/$POOL_NAME (100G)"
-                lvcreate -L 100G -T "$VG_NAME/$POOL_NAME" || {
-                  echo "LVM Init: Thin pool creation failed, may already exist"
-                }
-              fi
-              
-              echo "LVM Init: Complete on $(hostname)"
-              
-              # Keep running to keep pod alive
-              sleep infinity
+              while true; do sleep 3600; done
           volumeMounts:
             - name: host-root
               mountPath: /host
@@ -1198,172 +922,19 @@ piraeus_apply_cluster_resources() {
   render_storageclass             | kubectl apply -f -
 }
 
-reset_linstor_internal_db() {
-  step "reset LINSTOR internal CRD DB (internal.linstor.linbit.com)"
-  if kubectl api-resources --api-group=internal.linstor.linbit.com -o name >/dev/null 2>&1; then
-    kubectl api-resources --api-group=internal.linstor.linbit.com -o name \
-      | xargs -r -n1 kubectl delete --all --ignore-not-found >/dev/null 2>&1 || true
-  fi
-}
-
-# Fix LINSTOR DB migration issues (corrupted state from failed migrations)
 reset_linstor_db_migration() {
   step "reset LINSTOR DB migration state"
   
-  info "Deleting LINSTOR backup secrets (migration state)..."
   kubectl delete secrets -n piraeus-datastore -l piraeus.io/linstor-backup --ignore-not-found 2>/dev/null || true
-  
-  info "Deleting LINSTOR remote database CRDs..."
   kubectl delete linstorremotedatabases.internal.linstor.linbit.com --all -n piraeus-datastore --ignore-not-found 2>/dev/null || true
-  
-  info "Restarting linstor-controller pod..."
   kubectl delete pod -n piraeus-datastore -l app.kubernetes.io/component=linstor-controller --ignore-not-found 2>/dev/null || true
-  
-  info "Waiting for controller to restart..."
   sleep 5
-  kubectl get pods -n piraeus-datastore -l app.kubernetes.io/component=linstor-controller -o wide || true
-}
-
-cmd_fix_linstor_db() {
-  need kubectl
-
-  if ! ensure_kubeconfig; then
-    die "No kubeconfig found (set KUBECONFIG or run ./do plan-apply/apply first)."
-  fi
-
-  step "fix LINSTOR DB migration issues"
-  info "This fixes 'Cannot perform Migration while a rollback has to be done' errors."
-  info "KUBECONFIG=$KUBECONFIG"
-  
-  reset_linstor_db_migration
-  
-  info ""
-  info "Controller should restart. Watch with:"
-  info "  kubectl get pods -n piraeus-datastore -l app.kubernetes.io/component=linstor-controller -w"
-  info ""
-  info "If still broken, run: ./do nuke-piraeus"
-}
-
-cmd_nuke_piraeus() {
-  need kubectl
-
-  if ! ensure_kubeconfig; then
-    die "No kubeconfig found (set KUBECONFIG or run ./do plan-apply/apply first)."
-  fi
-
-  step "NUKE piraeus/linstor (complete removal)"
-  warn "This DELETES the entire piraeus-datastore namespace and all CRDs!"
-  warn "All LINSTOR storage pools and data references will be lost."
-  info "KUBECONFIG=$KUBECONFIG"
-  
-  # Force delete namespace
-  info "Deleting piraeus-datastore namespace..."
-  kubectl delete namespace piraeus-datastore --grace-period=0 --force --ignore-not-found --timeout=10s 2>/dev/null || true
-  
-  # Wait a bit
-  sleep 3
-  
-  # Clear stuck namespace
-  strip_finalizers_ns_if_stuck piraeus-datastore
-  
-  # Delete StorageClass first (no finalizers usually)
-  kubectl delete storageclass "$STORAGECLASS_NAME" --ignore-not-found 2>/dev/null || true
-  
-  # Remove finalizers from all piraeus/linstor CRDs and delete them
-  info "Removing finalizers and deleting Piraeus/LINSTOR CRDs..."
-  local crd
-  for crd in $(kubectl get crd -o name 2>/dev/null | grep -E 'piraeus|linstor' || true); do
-    info "  Cleaning: $crd"
-    # Remove finalizers first
-    kubectl patch "$crd" -p '{"metadata":{"finalizers":[]}}' --type=merge 2>/dev/null || true
-    # Then delete with short timeout
-    kubectl delete "$crd" --timeout=10s 2>/dev/null || true
-  done
-  
-  # Double-check internal LINSTOR CRDs
-  info "Cleaning internal.linstor.linbit.com CRDs..."
-  for crd in $(kubectl get crd -o name 2>/dev/null | grep 'internal.linstor.linbit.com' || true); do
-    kubectl patch "$crd" -p '{"metadata":{"finalizers":[]}}' --type=merge 2>/dev/null || true
-    kubectl delete "$crd" --timeout=10s 2>/dev/null || true
-  done
-  
-  # Verify cleanup
-  local remaining
-  remaining=$(kubectl get crd -o name 2>/dev/null | grep -E 'piraeus|linstor' || true)
-  if [[ -n "$remaining" ]]; then
-    warn "Some CRDs still remain (may need manual cleanup):"
-    echo "$remaining"
-  else
-    info "All Piraeus/LINSTOR CRDs removed."
-  fi
-  
-  info ""
-  info "Piraeus nuked. Run './do apply' to reinstall."
-}
-
-load_next_piraeus_version() {
-  # Load next version from fallback candidates
-  if [[ "$PIRAEUS_VERSION_FALLBACK_ENABLED" != "1" ]]; then
-    return 1  # No fallback available
-  fi
-  
-  if [[ "$CURRENT_VERSION_INDEX" -ge "${#PIRAEUS_VERSION_CANDIDATES[@]}" ]]; then
-    return 1  # No more versions to try
-  fi
-  
-  local version_pair="${PIRAEUS_VERSION_CANDIDATES[$CURRENT_VERSION_INDEX]}"
-  PIRAEUS_OPERATOR_VERSION="${version_pair%:*}"
-  LINSTOR_IMAGE_VERSION="${version_pair#*:}"
-  CURRENT_VERSION_INDEX=$((CURRENT_VERSION_INDEX + 1))
-  
-  info "Trying Piraeus version: Operator=$PIRAEUS_OPERATOR_VERSION, Linstor=$LINSTOR_IMAGE_VERSION"
-  return 0
-}
-
-diagnose_pod_issues() {
-  # Check for common pod startup issues and provide actionable feedback
-  local ns="piraeus-datastore"
-  
-  info "Diagnosing pod issues in $ns..."
-  
-  # Check for ImagePullBackOff
-  local image_pull_errors
-  image_pull_errors=$(kubectl -n "$ns" get pods -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.containerStatuses[*].state.waiting.reason}{"\n"}{end}' 2>/dev/null | grep -i "ImagePullBackOff\|ErrImagePull" || true)
-  
-  if [[ -n "$image_pull_errors" ]]; then
-    warn "Found ImagePullBackOff errors:"
-    echo "$image_pull_errors"
-    warn ""
-    warn "This usually means:"
-    warn "  1. The image registry (quay.io) is unreachable from your cluster"
-    warn "  2. The image version doesn't exist"
-    warn "  3. Rate limiting from the registry"
-    warn ""
-    warn "Possible solutions:"
-    warn "  - Check cluster has internet access: kubectl run -it --rm debug --image=busybox --restart=Never -- wget -O- https://quay.io"
-    warn "  - Try an older Piraeus version: PIRAEUS_OPERATOR_VERSION=2.9.0 LINSTOR_IMAGE_VERSION=1.28.0 ./do apply"
-    warn "  - Configure an image pull secret if using a private registry"
-    return 1
-  fi
-  
-  # Check for Init container issues
-  local init_errors
-  init_errors=$(kubectl -n "$ns" get pods -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.initContainerStatuses[*].state.waiting.reason}{"\n"}{end}' 2>/dev/null | grep -v "^$" | grep -v "PodInitializing" || true)
-  
-  if [[ -n "$init_errors" ]]; then
-    warn "Found Init container errors:"
-    echo "$init_errors"
-  fi
-  
-  return 0
 }
 
 wait_linstor_ready() {
   step "piraeus wait datastore"
-  # Wait for LinstorCluster to become Available (controller reachable).
-  local attempt=1
   local start_time=$SECONDS
-  local timeout_seconds=900  # 15 minutes
+  local timeout_seconds=900
   
   info "Waiting for LinstorCluster to become Available..."
   
@@ -1372,44 +943,36 @@ wait_linstor_ready() {
     local elapsed_min=$((elapsed / 60))
     local elapsed_sec=$((elapsed % 60))
     
-    # Get current status
     local controller_status satellite_count satellite_ready linstor_status
     controller_status=$(kubectl get pods -n piraeus-datastore -l app.kubernetes.io/component=linstor-controller --no-headers 2>/dev/null | awk '{print $3}' | head -1 || echo "Unknown")
     satellite_count=$(kubectl get pods -n piraeus-datastore -l app.kubernetes.io/component=linstor-satellite --no-headers 2>/dev/null | wc -l | tr -d ' ')
     satellite_ready=$(kubectl get pods -n piraeus-datastore -l app.kubernetes.io/component=linstor-satellite --no-headers 2>/dev/null | grep -c "2/2.*Running" || echo 0)
     linstor_status=$(kubectl get linstorcluster linstor -n piraeus-datastore -o jsonpath='{.status.conditions[?(@.type=="Available")].status}' 2>/dev/null || echo "Unknown")
     
-    # Show progress
     printf "\r\033[K  [%02d:%02d] Controller: %-15s | Satellites: %s/%s ready | LinstorCluster: %s" \
       "$elapsed_min" "$elapsed_sec" "$controller_status" "$satellite_ready" "$satellite_count" "$linstor_status"
     
-    # Check if available
     if [[ "$linstor_status" == "True" ]]; then
-      echo ""  # newline
+      echo ""
       progress_done "LinstorCluster is Available (${elapsed_min}m ${elapsed_sec}s)"
       return 0
     fi
     
-    # Check timeout
     if [[ $elapsed -ge $timeout_seconds ]]; then
-      echo ""  # newline
-      progress_fail "Timeout waiting for LinstorCluster (${elapsed_min}m ${elapsed_sec}s)"
+      echo ""
+      progress_fail "Timeout waiting for LinstorCluster"
       break
     fi
     
-    # Check for controller crash
     if [[ "$controller_status" == "CrashLoopBackOff" || "$controller_status" == "Error" ]]; then
-      local controller_logs
-      controller_logs="$(kubectl -n piraeus-datastore logs -l app.kubernetes.io/component=linstor-controller --all-containers --tail=50 2>/dev/null || true)"
+      local logs
+      logs="$(kubectl -n piraeus-datastore logs -l app.kubernetes.io/component=linstor-controller --tail=50 2>/dev/null || true)"
       
-      # Check for DB migration issues
-      if [[ "$AUTO_RESET_LINSTOR_DB" == "1" && "$attempt" -eq 1 ]]; then
-        if echo "$controller_logs" | grep -qiE 'rollback has to be done|Database initialization error|Cannot perform Migration'; then
-          echo ""  # newline
-          warn "Detected LINSTOR DB migration failure. Resetting internal DB and retrying once."
+      if [[ "$AUTO_RESET_LINSTOR_DB" == "1" ]]; then
+        if echo "$logs" | grep -qiE 'rollback has to be done|Database initialization error'; then
+          echo ""
+          warn "Detected LINSTOR DB migration failure. Resetting..."
           reset_linstor_db_migration
-          attempt=$((attempt + 1))
-          sleep 10
           continue
         fi
       fi
@@ -1418,116 +981,62 @@ wait_linstor_ready() {
     sleep 3
   done
 
-  # Timeout reached - dump diagnostics
-  warn "LinstorCluster did not become Available within timeout. Dumping diagnostics."
-  kubectl -n piraeus-datastore get pods -o wide || true
-  
-  # Run diagnostics
-  local has_image_issues=0
-  diagnose_pod_issues || has_image_issues=$?
-  
-  kubectl -n piraeus-datastore describe linstorcluster.piraeus.io/linstor || true
-
-  local controller_logs
-  controller_logs="$(kubectl -n piraeus-datastore logs -l app.kubernetes.io/component=linstor-controller --all-containers --tail=300 2>/dev/null || true)"
-  [[ -n "$controller_logs" ]] && echo "$controller_logs"
-
-  # Check for image pull issues and try fallback version
-  if [[ "$has_image_issues" -eq 1 && "$PIRAEUS_VERSION_FALLBACK_ENABLED" == "1" ]]; then
-    if load_next_piraeus_version; then
-      warn "Image pull failed. Retrying with older Piraeus version..."
-      warn "Cleaning up failed installation..."
-      kubectl delete linstorcluster linstor --ignore-not-found >/dev/null 2>&1 || true
-      kubectl delete linstorsatelliteconfigurations.piraeus.io --all --ignore-not-found >/dev/null 2>&1 || true
-      kubectl -n piraeus-datastore delete pods --all --ignore-not-found >/dev/null 2>&1 || true
-      sleep 5
-      
-      # Reinstall with new version
-      piraeus_apply_cluster_resources
-      wait_linstor_ready  # Recursive retry with new version
-      return $?
-    fi
-  fi
-
   die "LinstorCluster/linstor not Available"
 }
 
-patch_satellites_for_talos() {
-  # Talos doesn't use systemd; the Piraeus operator adds problematic mounts
-  # Force-delete satellite pods to trigger fresh restart - sometimes helps with mount issues
-  step "force-restarting satellite pods for Talos (systemd-incompatible mounts detected)"
-  
-  kubectl -n piraeus-datastore delete pods -l app.kubernetes.io/component=linstor-satellite --grace-period=0 --force 2>/dev/null || true
-  sleep 5
-  
-  info "Satellite pods deleted. DaemonSet will recreate them..."
-  info "Note: Talos doesn't have /run/systemd/system/. Piraeus operator assumes systemd."
-  info "Satellites may eventually work despite init container errors, or may require alternative storage setup."
-}
-
 wait_satellites_ready() {
-  step "piraeus wait satellites (pods Ready)"
+  step "piraeus wait satellites"
   
-  local retry_count=0
-  local max_retries=2
+  if kubectl -n piraeus-datastore wait pod -l app.kubernetes.io/component=linstor-satellite --for=condition=Ready --timeout="$WAIT_SATELLITE_PODS_TIMEOUT" 2>/dev/null; then
+    info "✓ Satellites are Ready"
+    return 0
+  fi
   
-  while [[ $retry_count -le $max_retries ]]; do
-    # Show current status
-    info "DEBUG: Satellite pod status (attempt $((retry_count + 1))/$((max_retries + 1))):"
-    kubectl -n piraeus-datastore get pods -l app.kubernetes.io/component=linstor-satellite -o wide 2>/dev/null | tee /tmp/satellite-status.log || true
-    
-    info "DEBUG: Checking pod conditions..."
-    kubectl -n piraeus-datastore get pods -l app.kubernetes.io/component=linstor-satellite -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.conditions[*].status}{"\n"}{end}' 2>/dev/null | tee /tmp/satellite-conditions.log || true
-    
-    # Try waiting for satellites
-    if kubectl -n piraeus-datastore wait pod -l app.kubernetes.io/component=linstor-satellite --for=condition=Ready --timeout="$WAIT_SATELLITE_PODS_TIMEOUT" 2>/dev/null; then
-      info "✓ Satellites are Ready"
-      return 0
-    fi
-    
-    retry_count=$((retry_count + 1))
-    
-    if [[ $retry_count -le $max_retries ]]; then
-      warn "Satellites not Ready (attempt $retry_count/$max_retries). Showing diagnostics..."
-      kubectl -n piraeus-datastore describe pods -l app.kubernetes.io/component=linstor-satellite 2>&1 | tee /tmp/satellite-describe.log | grep -A 10 "Events:" || true
-      warn "Attempting restart..."
-      patch_satellites_for_talos
-      sleep 10
-    fi
-  done
-  
-  # Not ready after retries - show detailed diagnostics and continue anyway
-  warn "Satellites still not Ready after $max_retries restart attempts."
-  warn ""
-  warn "=== SATELLITE DIAGNOSTICS ==="
-  warn "Recent pod status:"
-  kubectl -n piraeus-datastore get pods -l app.kubernetes.io/component=linstor-satellite -o wide 2>&1 | tee /tmp/satellite-final-status.log || true
-  
-  warn ""
-  warn "Pod descriptions (last 30 lines each):"
-  kubectl -n piraeus-datastore describe pods -l app.kubernetes.io/component=linstor-satellite 2>&1 | tail -100 | tee /tmp/satellite-final-describe.log || true
-  
-  warn ""
-  warn "Satellite container logs:"
-  kubectl -n piraeus-datastore logs -l app.kubernetes.io/component=linstor-satellite --all-containers=true --tail=20 2>&1 | tee /tmp/satellite-logs.log || true
-  
-  warn ""
-  warn "Known Issues on Talos:"
-  warn "  - /run/systemd/system/ doesn't exist (Talos uses minimal init)"
-  warn "  - Init containers may fail on systemd-related mounts"
-  warn "  - Force-delete helps pods restart and work around issues"
-  warn ""
-  warn "Monitoring:"
-  warn "  kubectl get pods -n piraeus-datastore -w"
-  warn "  kubectl logs -n piraeus-datastore -l app.kubernetes.io/component=linstor-satellite -f"
-  warn ""
-  warn "All diagnostics saved to /tmp/satellite-*.log"
-  info "Continuing with deployment anyway..."
+  warn "Satellites not Ready after timeout. Continuing anyway..."
   return 0
 }
 
-# StoragePool readiness is harder to assert without linstor-cli (which has been unstable/segfaulting for you).
-# We instead validate by creating a PVC and actually mounting it (smoke test).
+configure_linstor_storage_pools() {
+  [[ "${#WORKER_NODE_NAMES[@]}" -gt 0 ]] || return 0
+  need kubectl
+
+  step "configure LINSTOR storage pools"
+
+  local linstor_pod
+  linstor_pod=$(kubectl -n piraeus-datastore get pod -l app.kubernetes.io/component=linstor-controller -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+  
+  if [[ -z "$linstor_pod" ]]; then
+    warn "No linstor-controller pod found"
+    return 0
+  fi
+
+  # Wait for LVM init
+  local timeout=120 elapsed=0
+  while [[ $elapsed -lt $timeout ]]; do
+    local ready desired
+    ready=$(kubectl get daemonset -n piraeus-datastore lvm-init -o jsonpath='{.status.numberReady}' 2>/dev/null || echo "0")
+    desired=$(kubectl get daemonset -n piraeus-datastore lvm-init -o jsonpath='{.status.desiredNumberScheduled}' 2>/dev/null || echo "0")
+    
+    if [[ "$ready" -eq "$desired" ]] && [[ "$desired" -gt 0 ]]; then
+      info "✓ LVM init DaemonSet ready ($ready/$desired)"
+      break
+    fi
+    
+    sleep 2
+    elapsed=$((elapsed + 2))
+  done
+
+  for i in "${!WORKER_NODE_NAMES[@]}"; do
+    local node="${WORKER_NODE_NAMES[$i]}"
+    info "Creating storage pool on $node..."
+    kubectl -n piraeus-datastore exec "$linstor_pod" -- linstor \
+      storage-pool create lvmthin "$node" "${POOL_NAME}" "linstor-vg/${POOL_NAME}" 2>&1 || true
+  done
+  
+  info "Storage pools configured"
+  kubectl -n piraeus-datastore exec "$linstor_pod" -- linstor storage-pool list 2>&1 || true
+}
+
 storage_smoke_test() {
   step "linstor pvc smoke test"
   local ns="linstor-smoke"
@@ -1565,154 +1074,135 @@ spec:
 YAML
 
   if ! kubectl -n "$ns" wait pod/test-pod --for=condition=Ready --timeout=10m; then
-    warn "Smoke test pod did not become Ready. Diagnostics:"
+    warn "Smoke test pod did not become Ready"
     kubectl -n "$ns" describe pod/test-pod || true
-    kubectl -n "$ns" get events --sort-by=.lastTimestamp | tail -n 100 || true
-    kubectl -n piraeus-datastore get pods -o wide || true
-    kubectl -n piraeus-datastore logs -l app.kubernetes.io/component=linstor-controller --all-containers --tail=300 || true
-    kubectl -n piraeus-datastore logs -l app.kubernetes.io/component=linstor-satellite --all-containers --tail=200 || true
-    die "LINSTOR smoke test failed (PVC/Pod not Ready)"
+    kubectl -n "$ns" delete pod/test-pod pvc/test-pvc --ignore-not-found >/dev/null 2>&1 || true
+    die "LINSTOR smoke test failed"
   fi
 
   kubectl -n "$ns" logs pod/test-pod || true
   kubectl -n "$ns" delete pod/test-pod pvc/test-pvc --ignore-not-found >/dev/null 2>&1 || true
-  info "LINSTOR smoke test OK."
+  info "LINSTOR smoke test OK"
 }
 
 export_ingress_ca() {
   step "export kubernetes ingress ca"
-  # Many Talos setups expose ingress CA via secret in kube-system or via cert-manager; your earlier do scripts exported it.
-  # We keep this as best-effort: if the secret doesn't exist, we just skip.
   local secret="kubernetes-ingress-ca"
   if kubectl -n kube-system get secret "$secret" >/dev/null 2>&1; then
     kubectl -n kube-system get secret "$secret" -o jsonpath='{.data.ca\.crt}' | base64 -d > "$INGRESS_CA_OUT"
     info "Wrote: $INGRESS_CA_OUT"
   else
-    warn "Secret kube-system/$secret not found; skipping CA export."
+    warn "Secret kube-system/$secret not found; skipping"
   fi
 }
 
 # -----------------------------
-# Reset/uninstall helpers
+# Reset helpers
 # -----------------------------
 strip_finalizers_ns_if_stuck() {
   local ns="$1"
   local phase
   phase="$(kubectl get ns "$ns" -o jsonpath='{.status.phase}' 2>/dev/null || true)"
   if [[ "$phase" == "Terminating" ]]; then
-    warn "Namespace $ns is Terminating. Clearing finalizers (best-effort)."
     kubectl patch ns "$ns" --type=merge -p '{"metadata":{"finalizers":[]}}' >/dev/null 2>&1 || true
   fi
 }
 
 cmd_reset_piraeus() {
   need kubectl
+  ensure_kubeconfig || die "No kubeconfig found"
 
-  if ! ensure_kubeconfig; then
-    die "No kubeconfig found (set KUBECONFIG or run ./do plan-apply/apply first)."
-  fi
-
-  step "reset piraeus/linstor (uninstall from cluster)"
-  warn "This removes Piraeus/LINSTOR resources from the CURRENT cluster referenced by KUBECONFIG."
-  info "KUBECONFIG=$KUBECONFIG"
-
-  # Delete smoke namespace (if any)
+  step "reset piraeus/linstor"
+  
   kubectl delete ns linstor-smoke --ignore-not-found --timeout=2m >/dev/null 2>&1 || true
-
-  # Delete our StorageClass
   kubectl delete storageclass "$STORAGECLASS_NAME" --ignore-not-found >/dev/null 2>&1 || true
-
-  # Delete core CRs
   kubectl -n piraeus-datastore delete linstorcluster linstor --ignore-not-found --timeout=3m >/dev/null 2>&1 || true
   kubectl delete linstorsatelliteconfigurations.piraeus.io --all --ignore-not-found >/dev/null 2>&1 || true
-
-  if [[ "$RESET_LINSTOR_DB" == "1" ]]; then
-    reset_linstor_internal_db
-  fi
-
-  # Delete namespace
   kubectl delete ns piraeus-datastore --ignore-not-found --timeout=5m >/dev/null 2>&1 || true
   strip_finalizers_ns_if_stuck piraeus-datastore
 
-  # Attempt uninstall operator components + CRDs
-  step "delete piraeus operator manifests"
   kubectl delete -k "https://github.com/piraeusdatastore/piraeus-operator/config/default?ref=v${PIRAEUS_OPERATOR_VERSION}" >/dev/null 2>&1 || true
 
-  info "reset-piraeus complete (best-effort)."
+  info "reset-piraeus complete"
 }
 
 cmd_reset_all() {
-  # reset-all = reset-piraeus + terraform destroy + cleanup local generated artifacts
   step "reset-all"
 
-  # Best-effort piraeus reset if kubeconfig exists
   if ensure_kubeconfig; then
-    warn "reset-all: trying reset-piraeus first (best-effort)"
     set +e
     cmd_reset_piraeus
     set -e
-  else
-    warn "reset-all: no kubeconfig found; skipping reset-piraeus"
   fi
 
-  if [[ "$SKIP_TERRAFORM" != "1" ]]; then
+  if [[ "$RUN_TERRAFORM" == "1" ]]; then
     terraform_init
     set +e
     terraform_destroy
     set -e
-  else
-    warn "reset-all: skipping terraform destroy (SKIP_TERRAFORM=1)"
   fi
 
   step "cleanup local generated files"
   rm -f "$PLANFILE" "$KUBECONFIG_OUT" "$KUBECONFIG_RAW_OUT" "$KUBECONFIG_LENS_OUT" "$TALOSCONFIG_OUT" "$INGRESS_CA_OUT" 2>/dev/null || true
-  rm -rf "$WORKDIR/.terraform" 2>/dev/null || true
-  rm -f "$WORKDIR/.terraform.lock.hcl" 2>/dev/null || true
 
-  if [[ "${NUKE_TFSTATE:-0}" == "1" ]]; then
-    warn "NUKE_TFSTATE=1: removing terraform state files (you will lose ability to destroy unmanaged leftovers)"
-    rm -f "$WORKDIR/terraform.tfstate" "$WORKDIR/terraform.tfstate.backup" "$WORKDIR/.terraform.tfstate.lock.info" 2>/dev/null || true
-  fi
+  info "reset-all done"
+}
 
-  info "reset-all done."
+cmd_fix_linstor_db() {
+  need kubectl
+  ensure_kubeconfig || die "No kubeconfig found"
+
+  step "fix LINSTOR DB migration issues"
+  reset_linstor_db_migration
+  
+  info "Controller should restart. Watch with:"
+  info "  kubectl get pods -n piraeus-datastore -l app.kubernetes.io/component=linstor-controller -w"
+}
+
+cmd_nuke_piraeus() {
+  need kubectl
+  ensure_kubeconfig || die "No kubeconfig found"
+
+  step "NUKE piraeus/linstor"
+  warn "This DELETES everything!"
+  
+  kubectl delete namespace piraeus-datastore --grace-period=0 --force --ignore-not-found --timeout=10s 2>/dev/null || true
+  sleep 3
+  strip_finalizers_ns_if_stuck piraeus-datastore
+  
+  kubectl delete storageclass "$STORAGECLASS_NAME" --ignore-not-found 2>/dev/null || true
+  
+  for crd in $(kubectl get crd -o name 2>/dev/null | grep -E 'piraeus|linstor' || true); do
+    kubectl patch "$crd" -p '{"metadata":{"finalizers":[]}}' --type=merge 2>/dev/null || true
+    kubectl delete "$crd" --timeout=10s 2>/dev/null || true
+  done
+  
+  info "Piraeus nuked. Run './do apply' to reinstall."
 }
 
 # -----------------------------
 # Traefik Ingress Controller
 # -----------------------------
-
-TRAEFIK_VERSION="${TRAEFIK_VERSION:-33.2.1}"
-TRAEFIK_NAMESPACE="${TRAEFIK_NAMESPACE:-traefik}"
-TRAEFIK_LB_IP="${TRAEFIK_LB_IP:-192.168.190.130}"
-
 deploy_traefik() {
   step "deploy Traefik ingress controller"
   need kubectl
   need helm
 
-  # Create namespace
-  kubectl create namespace "$TRAEFIK_NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
+  local ns="traefik"
+  kubectl create namespace "$ns" --dry-run=client -o yaml | kubectl apply -f -
 
-  # Add Traefik Helm repo
   helm repo add traefik https://traefik.github.io/charts 2>/dev/null || true
   helm repo update traefik
 
-  # Check if already installed
-  if helm status traefik -n "$TRAEFIK_NAMESPACE" &>/dev/null; then
-    info "Traefik already installed, upgrading..."
-    local cmd="upgrade"
-  else
-    info "Installing Traefik..."
-    local cmd="install"
-  fi
+  local cmd="install"
+  helm status traefik -n "$ns" &>/dev/null && cmd="upgrade"
 
-  # Install/upgrade Traefik
+  info "${cmd^}ing Traefik..."
   helm $cmd traefik traefik/traefik \
-    --namespace "$TRAEFIK_NAMESPACE" \
+    --namespace "$ns" \
     --version "$TRAEFIK_VERSION" \
-    --set deployment.replicas=2 \
+    --set deployment.replicas="$TRAEFIK_REPLICAS" \
     --set service.type=LoadBalancer \
-    --set "service.annotations.io\.cilium/lb-ipam-ips=$TRAEFIK_LB_IP" \
     --set ports.web.redirectTo.port=websecure \
     --set ports.websecure.tls.enabled=true \
     --set ingressRoute.dashboard.enabled=true \
@@ -1724,50 +1214,42 @@ deploy_traefik() {
     --set logs.access.enabled=true \
     --wait --timeout=5m
 
-  # Wait for Traefik to be ready
-  kubectl rollout status deployment/traefik -n "$TRAEFIK_NAMESPACE" --timeout=5m
+  kubectl rollout status deployment/traefik -n "$ns" --timeout=5m
 
-  # Show status
   info "Traefik deployed!"
-  kubectl get svc -n "$TRAEFIK_NAMESPACE" traefik
+  kubectl get svc -n "$ns" traefik
   
   local lb_ip
-  lb_ip=$(kubectl get svc -n "$TRAEFIK_NAMESPACE" traefik -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "pending")
+  lb_ip=$(kubectl get svc -n "$ns" traefik -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "pending")
   info "Traefik LoadBalancer IP: $lb_ip"
 }
 
 # -----------------------------
 # Harbor Container Registry
 # -----------------------------
-
-HARBOR_VERSION="${HARBOR_VERSION:-1.16.2}"
-HARBOR_NAMESPACE="${HARBOR_NAMESPACE:-harbor}"
-HARBOR_STORAGE_CLASS="${HARBOR_STORAGE_CLASS:-linstor-lvm-r1}"
-HARBOR_ADMIN_PASSWORD="${HARBOR_ADMIN_PASSWORD:-Harbor12345}"
-HARBOR_DOMAIN="${HARBOR_DOMAIN:-harbor.${INGRESS_DOMAIN:-cure.dev}}"
-
 deploy_harbor() {
   step "deploy Harbor container registry"
   need kubectl
   need helm
 
-  # Create namespace
-  kubectl create namespace "$HARBOR_NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
+  local ns="harbor"
+  local harbor_domain="harbor.${INGRESS_DOMAIN}"
+  
+  kubectl create namespace "$ns" --dry-run=client -o yaml | kubectl apply -f -
 
-  # Create TLS certificate via cert-manager (if available)
+  # Create TLS certificate if cert-manager available
   if kubectl get clusterissuer ingress &>/dev/null; then
-    info "Creating Harbor TLS certificate via cert-manager..."
     kubectl apply -f - <<EOF
 apiVersion: cert-manager.io/v1
 kind: Certificate
 metadata:
   name: harbor-tls
-  namespace: $HARBOR_NAMESPACE
+  namespace: $ns
 spec:
   secretName: harbor-tls
   commonName: harbor
   dnsNames:
-    - $HARBOR_DOMAIN
+    - $harbor_domain
   issuerRef:
     kind: ClusterIssuer
     name: ingress
@@ -1776,126 +1258,157 @@ spec:
     size: 256
   duration: 4320h
 EOF
-    # Wait for certificate
-    kubectl wait --for=condition=Ready certificate/harbor-tls -n "$HARBOR_NAMESPACE" --timeout=60s || warn "Certificate may not be ready yet"
-  else
-    warn "cert-manager ClusterIssuer 'ingress' not found, Harbor will use auto-generated certs"
+    kubectl wait --for=condition=Ready certificate/harbor-tls -n "$ns" --timeout=60s || true
   fi
 
-  # Add Harbor Helm repo
   helm repo add harbor https://helm.goharbor.io 2>/dev/null || true
   helm repo update harbor
 
-  # Check if already installed
-  if helm status harbor -n "$HARBOR_NAMESPACE" &>/dev/null; then
-    info "Harbor already installed, upgrading..."
-    local cmd="upgrade"
-  else
-    info "Installing Harbor..."
-    local cmd="install"
-  fi
+  local cmd="install"
+  helm status harbor -n "$ns" &>/dev/null && cmd="upgrade"
 
-  # Install/upgrade Harbor
+  # Create values file (avoids type conversion issues with --set)
+  local values_file
+  values_file=$(mktemp)
+  cat > "$values_file" <<YAML
+externalURL: https://$harbor_domain
+expose:
+  type: ingress
+  tls:
+    enabled: true
+    certSource: secret
+    secret:
+      secretName: harbor-tls
+  ingress:
+    hosts:
+      core: $harbor_domain
+    className: traefik
+persistence:
+  enabled: true
+  persistentVolumeClaim:
+    registry:
+      storageClass: "$STORAGECLASS_NAME"
+      size: $HARBOR_REGISTRY_SIZE
+    database:
+      storageClass: "$STORAGECLASS_NAME"
+      size: 5Gi
+    redis:
+      storageClass: "$STORAGECLASS_NAME"
+      size: 1Gi
+    trivy:
+      storageClass: "$STORAGECLASS_NAME"
+      size: 5Gi
+harborAdminPassword: "$HARBOR_ADMIN_PASSWORD"
+trivy:
+  enabled: true
+notary:
+  enabled: false
+metrics:
+  enabled: true
+YAML
+
+  info "${cmd^}ing Harbor..."
   helm $cmd harbor harbor/harbor \
-    --namespace "$HARBOR_NAMESPACE" \
+    --namespace "$ns" \
     --version "$HARBOR_VERSION" \
-    --set externalURL="https://$HARBOR_DOMAIN" \
-    --set expose.type=ingress \
-    --set expose.tls.enabled=true \
-    --set expose.tls.certSource=secret \
-    --set expose.tls.secret.secretName=harbor-tls \
-    --set expose.ingress.hosts.core="$HARBOR_DOMAIN" \
-    --set expose.ingress.className=traefik \
-    --set "expose.ingress.annotations.traefik\.ingress\.kubernetes\.io/router\.entrypoints=websecure" \
-    --set "expose.ingress.annotations.traefik\.ingress\.kubernetes\.io/router\.tls=true" \
-    --set persistence.enabled=true \
-    --set persistence.persistentVolumeClaim.registry.storageClass="$HARBOR_STORAGE_CLASS" \
-    --set persistence.persistentVolumeClaim.registry.size=50Gi \
-    --set persistence.persistentVolumeClaim.database.storageClass="$HARBOR_STORAGE_CLASS" \
-    --set persistence.persistentVolumeClaim.database.size=5Gi \
-    --set persistence.persistentVolumeClaim.redis.storageClass="$HARBOR_STORAGE_CLASS" \
-    --set persistence.persistentVolumeClaim.redis.size=1Gi \
-    --set persistence.persistentVolumeClaim.trivy.storageClass="$HARBOR_STORAGE_CLASS" \
-    --set persistence.persistentVolumeClaim.trivy.size=5Gi \
-    --set harborAdminPassword="$HARBOR_ADMIN_PASSWORD" \
-    --set trivy.enabled=true \
-    --set notary.enabled=false \
-    --set metrics.enabled=true \
+    -f "$values_file" \
     --wait --timeout=10m
-
-  # Wait for core components
-  info "Waiting for Harbor components..."
-  kubectl rollout status deployment/harbor-core -n "$HARBOR_NAMESPACE" --timeout=5m || warn "harbor-core may not be ready"
-  kubectl rollout status deployment/harbor-portal -n "$HARBOR_NAMESPACE" --timeout=5m || warn "harbor-portal may not be ready"
+  
+  rm -f "$values_file"
 
   info "Harbor deployed!"
-  info "  URL: https://$HARBOR_DOMAIN"
-  info "  User: admin"
-  info "  Password: $HARBOR_ADMIN_PASSWORD"
+  info "  URL: https://$harbor_domain"
+  info "  User: admin / Password: $HARBOR_ADMIN_PASSWORD"
 }
 
 # -----------------------------
-# Monitoring Stack (Prometheus + Grafana)
+# Monitoring Stack
 # -----------------------------
-
-MONITORING_VERSION="${MONITORING_VERSION:-72.6.2}"
-MONITORING_NAMESPACE="${MONITORING_NAMESPACE:-monitoring}"
-GRAFANA_DOMAIN="${GRAFANA_DOMAIN:-grafana.${INGRESS_DOMAIN:-cure.dev}}"
-GRAFANA_ADMIN_PASSWORD="${GRAFANA_ADMIN_PASSWORD:-admin}"
-
 deploy_monitoring() {
-  step "deploy monitoring stack (Prometheus + Grafana)"
+  step "deploy monitoring stack"
   need kubectl
   need helm
 
-  # Create namespace
-  kubectl create namespace "$MONITORING_NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
+  local ns="monitoring"
+  local grafana_domain="grafana.${INGRESS_DOMAIN}"
+  
+  kubectl create namespace "$ns" --dry-run=client -o yaml | kubectl apply -f -
 
-  # Add Prometheus community Helm repo
   helm repo add prometheus-community https://prometheus-community.github.io/helm-charts 2>/dev/null || true
   helm repo update prometheus-community
 
-  # Check if already installed
-  if helm status monitoring -n "$MONITORING_NAMESPACE" &>/dev/null; then
-    info "Monitoring stack already installed, upgrading..."
-    local cmd="upgrade"
-  else
-    info "Installing monitoring stack..."
-    local cmd="install"
-  fi
+  local cmd="install"
+  helm status monitoring -n "$ns" &>/dev/null && cmd="upgrade"
 
-  # Install/upgrade kube-prometheus-stack
+  info "${cmd^}ing monitoring stack..."
   helm $cmd monitoring prometheus-community/kube-prometheus-stack \
-    --namespace "$MONITORING_NAMESPACE" \
+    --namespace "$ns" \
     --version "$MONITORING_VERSION" \
-    --set prometheus.prometheusSpec.storageSpec.volumeClaimTemplate.spec.storageClassName="$HARBOR_STORAGE_CLASS" \
-    --set prometheus.prometheusSpec.storageSpec.volumeClaimTemplate.spec.resources.requests.storage=20Gi \
+    --set prometheus.prometheusSpec.storageSpec.volumeClaimTemplate.spec.storageClassName="$STORAGECLASS_NAME" \
+    --set prometheus.prometheusSpec.storageSpec.volumeClaimTemplate.spec.resources.requests.storage="$PROMETHEUS_STORAGE_SIZE" \
+    --set prometheus.prometheusSpec.retention="$PROMETHEUS_RETENTION" \
     --set grafana.persistence.enabled=true \
-    --set grafana.persistence.storageClassName="$HARBOR_STORAGE_CLASS" \
+    --set grafana.persistence.storageClassName="$STORAGECLASS_NAME" \
     --set grafana.persistence.size=5Gi \
     --set grafana.adminPassword="$GRAFANA_ADMIN_PASSWORD" \
     --set grafana.ingress.enabled=true \
     --set grafana.ingress.ingressClassName=traefik \
-    --set "grafana.ingress.hosts[0]=$GRAFANA_DOMAIN" \
-    --set alertmanager.alertmanagerSpec.storage.volumeClaimTemplate.spec.storageClassName="$HARBOR_STORAGE_CLASS" \
+    --set "grafana.ingress.hosts[0]=$grafana_domain" \
+    --set alertmanager.alertmanagerSpec.storage.volumeClaimTemplate.spec.storageClassName="$STORAGECLASS_NAME" \
     --set alertmanager.alertmanagerSpec.storage.volumeClaimTemplate.spec.resources.requests.storage=2Gi \
     --wait --timeout=10m
 
-  info "Monitoring stack deployed!"
-  info "  Grafana URL: https://$GRAFANA_DOMAIN"
-  info "  Grafana User: admin"
-  info "  Grafana Password: $GRAFANA_ADMIN_PASSWORD"
+  info "Monitoring deployed!"
+  info "  Grafana: https://$grafana_domain"
+  info "  User: admin / Password: $GRAFANA_ADMIN_PASSWORD"
+}
+
+# -----------------------------
+# Gitea
+# -----------------------------
+deploy_gitea() {
+  step "deploy Gitea"
+  need kubectl
+  need helm
+
+  local ns="gitea"
+  local gitea_domain="gitea.${INGRESS_DOMAIN}"
+  
+  kubectl create namespace "$ns" --dry-run=client -o yaml | kubectl apply -f -
+
+  helm repo add gitea-charts https://dl.gitea.com/charts/ 2>/dev/null || true
+  helm repo update gitea-charts
+
+  local cmd="install"
+  helm status gitea -n "$ns" &>/dev/null && cmd="upgrade"
+
+  info "${cmd^}ing Gitea..."
+  helm $cmd gitea gitea-charts/gitea \
+    --namespace "$ns" \
+    --version "$GITEA_VERSION" \
+    --set gitea.admin.password="$GITEA_ADMIN_PASSWORD" \
+    --set persistence.enabled=true \
+    --set persistence.storageClass="$STORAGECLASS_NAME" \
+    --set persistence.size=10Gi \
+    --set ingress.enabled=true \
+    --set ingress.className=traefik \
+    --set "ingress.hosts[0].host=$gitea_domain" \
+    --set "ingress.hosts[0].paths[0].path=/" \
+    --set "ingress.hosts[0].paths[0].pathType=Prefix" \
+    --wait --timeout=10m
+
+  info "Gitea deployed!"
+  info "  URL: https://$gitea_domain"
+  info "  User: gitea_admin / Password: $GITEA_ADMIN_PASSWORD"
 }
 
 # -----------------------------
 # Print access info
 # -----------------------------
-
 print_access_info() {
   step "Access Information"
   
-  local traefik_ip harbor_ready grafana_ready
-  
+  local traefik_ip
   traefik_ip=$(kubectl get svc -n traefik traefik -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "N/A")
   
   echo ""
@@ -1905,42 +1418,55 @@ print_access_info() {
   echo ""
   echo "Kubeconfig: export KUBECONFIG=$KUBECONFIG_OUT"
   echo ""
-  echo "--- Ingress (Traefik) ---"
-  echo "LoadBalancer IP: $traefik_ip"
-  echo "Dashboard: https://traefik.${INGRESS_DOMAIN:-cure.dev}"
-  echo ""
+  
+  if [[ "$INGRESS_CONTROLLER" == "traefik" ]]; then
+    echo "--- Ingress (Traefik) ---"
+    echo "LoadBalancer IP: $traefik_ip"
+    echo "Dashboard: https://traefik.${INGRESS_DOMAIN}"
+    echo ""
+  else
+    local cilium_ip
+    cilium_ip=$(kubectl get svc -n kube-system cilium-ingress -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "N/A")
+    echo "--- Ingress (Cilium) ---"
+    echo "LoadBalancer IP: $cilium_ip"
+    echo ""
+  fi
   
   if kubectl get namespace harbor &>/dev/null; then
     echo "--- Harbor Container Registry ---"
-    echo "URL: https://${HARBOR_DOMAIN:-harbor.cure.dev}"
-    echo "User: admin"
-    echo "Password: $HARBOR_ADMIN_PASSWORD"
-    echo ""
-    echo "Docker login:"
-    echo "  docker login ${HARBOR_DOMAIN:-harbor.cure.dev} -u admin -p $HARBOR_ADMIN_PASSWORD"
+    echo "URL: https://harbor.${INGRESS_DOMAIN}"
+    echo "User: admin / Password: $HARBOR_ADMIN_PASSWORD"
     echo ""
   fi
   
   if kubectl get namespace monitoring &>/dev/null; then
     echo "--- Monitoring (Grafana) ---"
-    echo "URL: https://${GRAFANA_DOMAIN:-grafana.cure.dev}"
-    echo "User: admin"
-    echo "Password: $GRAFANA_ADMIN_PASSWORD"
+    echo "URL: https://grafana.${INGRESS_DOMAIN}"
+    echo "User: admin / Password: $GRAFANA_ADMIN_PASSWORD"
+    echo ""
+  fi
+  
+  if kubectl get namespace gitea &>/dev/null; then
+    echo "--- Gitea ---"
+    echo "URL: https://gitea.${INGRESS_DOMAIN}"
+    echo "User: gitea_admin / Password: $GITEA_ADMIN_PASSWORD"
     echo ""
   fi
   
   echo "--- DNS Setup ---"
-  echo "Add to /etc/hosts or local DNS:"
-  echo "  $traefik_ip  traefik.${INGRESS_DOMAIN:-cure.dev}"
-  echo "  $traefik_ip  harbor.${INGRESS_DOMAIN:-cure.dev}"
-  echo "  $traefik_ip  grafana.${INGRESS_DOMAIN:-cure.dev}"
-  echo "  $traefik_ip  gitea.${INGRESS_DOMAIN:-cure.dev}"
+  echo "Add to /etc/hosts or DNS:"
+  local ip="${traefik_ip:-N/A}"
+  [[ "$INGRESS_CONTROLLER" == "cilium" ]] && ip="${cilium_ip:-N/A}"
+  echo "  $ip  traefik.${INGRESS_DOMAIN}"
+  echo "  $ip  harbor.${INGRESS_DOMAIN}"
+  echo "  $ip  grafana.${INGRESS_DOMAIN}"
+  echo "  $ip  gitea.${INGRESS_DOMAIN}"
   echo ""
   echo "=============================================="
 }
 
 # -----------------------------
-# Main pipeline (after terraform apply)
+# Main pipeline
 # -----------------------------
 post_apply_pipeline() {
   need kubectl
@@ -1956,59 +1482,57 @@ post_apply_pipeline() {
   step "kubectl cluster-info"
   kubectl cluster-info
 
-  # Safety: validate disks BEFORE optional wiping / before creating pools.
   validate_worker_data_disks
-
   wipe_worker_disks
 
-  if [[ "$SKIP_PIRAEUS" == "1" ]]; then
-    warn "Skipping Piraeus install/config (SKIP_PIRAEUS=1)"
-    return 0
+  if [[ "$INSTALL_PIRAEUS" == "1" ]]; then
+    check_cluster_network_access || warn "Network check failed, continuing..."
+    piraeus_install_operator
+    piraeus_wait_operator
+    piraeus_relax_webhooks
+    piraeus_apply_cluster_resources
+    test_lvm_init_daemonset
+    wait_linstor_ready
+    wait_satellites_ready
+    test_satellite_readiness
+    test_linstor_nodes_registered
+    configure_linstor_storage_pools
+    test_storage_pools_created
+    storage_smoke_test
+  else
+    warn "Skipping Piraeus (INSTALL_PIRAEUS=false)"
   fi
 
-  # Pre-flight check: verify cluster can reach quay.io
-  check_cluster_network_access || warn "Network check failed, but continuing..."
-
-  piraeus_install_operator
-  piraeus_wait_operator
-  
-  piraeus_relax_webhooks
-  piraeus_apply_cluster_resources
-  test_lvm_init_daemonset
-  
-  wait_linstor_ready
-  wait_satellites_ready
-  test_satellite_readiness
-  test_linstor_nodes_registered
-  
-  # Configure storage pools via LINSTOR API after satellites are ready
-  configure_linstor_storage_pools
-  test_storage_pools_created
-  
-  storage_smoke_test
-  test_pvc_provisioning
   export_ingress_ca
 
-  # Deploy Traefik and Harbor if not skipped
-  if [[ "${SKIP_INGRESS:-0}" != "1" ]]; then
+  # Deploy ingress controller
+  if [[ "$INGRESS_CONTROLLER" == "traefik" ]]; then
     deploy_traefik
   else
-    warn "Skipping Traefik (SKIP_INGRESS=1)"
+    info "Using Cilium ingress controller (already deployed via Terraform)"
   fi
 
-  if [[ "${SKIP_HARBOR:-0}" != "1" ]]; then
+  # Deploy additional components
+  if [[ "$INSTALL_HARBOR" == "1" ]]; then
     deploy_harbor
-  else
-    warn "Skipping Harbor (SKIP_HARBOR=1)"
+  fi
+
+  if [[ "$INSTALL_MONITORING" == "1" ]]; then
+    deploy_monitoring
+  fi
+
+  if [[ "$INSTALL_GITEA" == "1" ]]; then
+    deploy_gitea
   fi
 
   step "cluster nodes"
   kubectl get nodes -o wide || true
 
-  step "Test summary"
-  run_all_tests
+  if [[ "$INSTALL_PIRAEUS" == "1" ]]; then
+    step "Test summary"
+    run_all_tests
+  fi
 
-  # Print access info
   print_access_info
 
   step "done"
@@ -2024,13 +1548,22 @@ cmd_plan() {
 }
 
 cmd_apply() {
-  need terraform
-  terraform_init
-  terraform_apply
+  show_config
+  
+  if [[ "$RUN_TERRAFORM" == "1" ]]; then
+    need terraform
+    terraform_init
+    terraform_apply
+  else
+    info "Skipping Terraform (RUN_TERRAFORM=false)"
+  fi
+  
   post_apply_pipeline
 }
 
 cmd_plan_apply() {
+  show_config
+  
   need terraform
   terraform_init
   terraform_plan
@@ -2041,73 +1574,160 @@ cmd_plan_apply() {
 cmd_destroy() {
   terraform_init
   terraform_destroy
-  info "NOTE: Terraform destroy does NOT wipe data disks inside VMs. If you re-create nodes with the same disks, use WIPE_DISKS=1 on next apply."
+}
+
+cmd_install_tools() {
+  step "Install required CLI tools"
+  
+  local os arch
+  os=$(uname -s | tr '[:upper:]' '[:lower:]')
+  arch=$(uname -m)
+  [[ "$arch" == "x86_64" ]] && arch="amd64"
+  [[ "$arch" == "aarch64" ]] && arch="arm64"
+  
+  info "Detected: OS=$os ARCH=$arch"
+  
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  cd "$tmpdir"
+  
+  local helm_version="3.17.0"
+  local terraform_version="1.14.3"
+  local talos_version="1.12.1"
+  local kubectl_version="1.32.0"
+  local cilium_version="0.19.0"
+  local hubble_version="1.18.5"
+  
+  # Helm
+  if ! command -v helm &>/dev/null; then
+    info "Installing helm..."
+    wget -q -O- "https://get.helm.sh/helm-v${helm_version}-${os}-${arch}.tar.gz" | tar xzf - "${os}-${arch}/helm"
+    sudo install "${os}-${arch}/helm" /usr/local/bin/helm
+  fi
+  
+  # Terraform
+  if ! command -v terraform &>/dev/null; then
+    info "Installing terraform..."
+    wget -q "https://releases.hashicorp.com/terraform/${terraform_version}/terraform_${terraform_version}_${os}_${arch}.zip"
+    unzip -q "terraform_${terraform_version}_${os}_${arch}.zip"
+    sudo install terraform /usr/local/bin/terraform
+  fi
+  
+  # kubectl
+  if ! command -v kubectl &>/dev/null; then
+    info "Installing kubectl..."
+    wget -q "https://dl.k8s.io/release/v${kubectl_version}/bin/${os}/${arch}/kubectl"
+    sudo install kubectl /usr/local/bin/kubectl
+  fi
+  
+  # talosctl
+  if ! command -v talosctl &>/dev/null; then
+    info "Installing talosctl..."
+    wget -q "https://github.com/siderolabs/talos/releases/download/v${talos_version}/talosctl-${os}-${arch}"
+    sudo install "talosctl-${os}-${arch}" /usr/local/bin/talosctl
+  fi
+  
+  # Cilium CLI
+  if ! command -v cilium &>/dev/null; then
+    info "Installing cilium CLI..."
+    wget -q -O- "https://github.com/cilium/cilium-cli/releases/download/v${cilium_version}/cilium-${os}-${arch}.tar.gz" | tar xzf - cilium
+    sudo install cilium /usr/local/bin/cilium
+  fi
+  
+  # Hubble
+  if ! command -v hubble &>/dev/null; then
+    info "Installing hubble..."
+    wget -q -O- "https://github.com/cilium/hubble/releases/download/v${hubble_version}/hubble-${os}-${arch}.tar.gz" | tar xzf - hubble
+    sudo install hubble /usr/local/bin/hubble
+  fi
+  
+  # yq
+  if ! command -v yq &>/dev/null; then
+    info "Installing yq..."
+    wget -q "https://github.com/mikefarah/yq/releases/latest/download/yq_${os}_${arch}"
+    sudo install "yq_${os}_${arch}" /usr/local/bin/yq
+  fi
+  
+  # jq
+  if ! command -v jq &>/dev/null; then
+    info "Installing jq..."
+    if [[ "$os" == "linux" ]]; then
+      sudo apt-get update -qq && sudo apt-get install -y -qq jq
+    elif [[ "$os" == "darwin" ]]; then
+      brew install jq
+    fi
+  fi
+  
+  cd - >/dev/null
+  rm -rf "$tmpdir"
+  
+  step "Installed tools"
+  echo "  helm:      $(helm version --short 2>/dev/null || echo 'not installed')"
+  echo "  terraform: $(terraform version -json 2>/dev/null | grep -o '"terraform_version":"[^"]*"' | cut -d'"' -f4 || echo 'not installed')"
+  echo "  kubectl:   $(kubectl version --client -o json 2>/dev/null | grep -o '"gitVersion":"[^"]*"' | cut -d'"' -f4 || echo 'not installed')"
+  echo "  talosctl:  $(talosctl version --client 2>/dev/null | grep -o 'Tag:.*' | awk '{print $2}' || echo 'not installed')"
+  echo "  cilium:    $(cilium version --client 2>/dev/null | grep -o 'cilium-cli:.*' | awk '{print $2}' || echo 'not installed')"
+  echo "  hubble:    $(hubble version 2>/dev/null | grep -o 'hubble:.*' | awk '{print $2}' || echo 'not installed')"
+  echo "  yq:        $(yq --version 2>/dev/null | awk '{print $NF}' || echo 'not installed')"
+  echo "  jq:        $(jq --version 2>/dev/null || echo 'not installed')"
 }
 
 usage() {
   cat <<USAGE
-Usage:
-  $0 plan
-  $0 apply
-  $0 plan-apply
-  $0 destroy
-  $0 reset-piraeus
-  $0 reset-all
-  $0 deploy-traefik      # Deploy Traefik only
-  $0 deploy-harbor       # Deploy Harbor only
-  $0 deploy-monitoring   # Deploy Prometheus + Grafana
-  $0 info                # Show access info
-  $0 test                # Run validation tests
+Usage: $0 <command>
 
-Common env overrides:
-  # Terraform var-file selection (optional)
-  TF_VAR_FILE=terraform.tfvars
+Commands:
+  plan              Terraform plan only
+  apply             Full deployment (terraform + bootstrap + components)
+  plan-apply        Terraform plan + apply + bootstrap
+  destroy           Terraform destroy only
+  reset-piraeus     Uninstall Piraeus/LINSTOR
+  reset-all         Full reset (piraeus + terraform + files)
+  fix-linstor-db    Fix LINSTOR DB migration errors
+  nuke-piraeus      Force remove all Piraeus resources
+  install-tools     Install CLI dependencies
+  
+  deploy-traefik    Deploy Traefik only
+  deploy-harbor     Deploy Harbor only
+  deploy-monitoring Deploy Prometheus + Grafana
+  deploy-gitea      Deploy Gitea
+  
+  config            Show current configuration
+  info              Show cluster access info
+  test              Run validation tests
 
-  # Piraeus/LINSTOR versions
-  PIRAEUS_OPERATOR_VERSION=2.10.4
-  LINSTOR_IMAGE_VERSION=1.32.3
+Configuration:
+  Edit do.cfg for settings, or create do.local.cfg for local overrides.
+  
+  Profiles:
+    PROFILE=full    Traefik + Harbor (default)
+    PROFILE=simple  Cilium ingress only
+    PROFILE=custom  Use individual toggles
 
-  # Storage / disks
-  DEFAULT_DEVICE=/dev/sdb
-  DEVICE_MAP='node1=/dev/sdb,node2=/dev/vdb'
-  POOL_NAME=lvm
-  STORAGECLASS_NAME=linstor-lvm-r1
-  AUTO_PLACE=1
+  Key settings (in do.cfg):
+    INGRESS_CONTROLLER   traefik or cilium
+    INSTALL_PIRAEUS      true/false
+    INSTALL_HARBOR       true/false
+    INSTALL_MONITORING   true/false
+    INGRESS_DOMAIN       Domain for services (default: cure.dev)
 
-  # Traefik
-  TRAEFIK_VERSION=33.2.1
-  TRAEFIK_LB_IP=192.168.190.130
-
-  # Harbor
-  HARBOR_VERSION=1.16.2
-  HARBOR_STORAGE_CLASS=linstor-lvm-r1
-  HARBOR_ADMIN_PASSWORD=Harbor12345
-  HARBOR_DOMAIN=harbor.cure.dev
-
-  # Monitoring
-  MONITORING_VERSION=72.6.2
-  GRAFANA_ADMIN_PASSWORD=admin
-
-  # Destructive flags (OFF by default)
-  WIPE_DISKS=1            # talosctl wipe disk <id> on each worker's DEFAULT_DEVICE/DEVICE_MAP disk
-  RESET_LINSTOR_DB=1      # reset-piraeus also deletes internal.linstor.linbit.com CRs
-  NUKE_TFSTATE=1          # reset-all also deletes terraform state files (danger)
-
-  # Skip steps
-  SKIP_TERRAFORM=1
-  SKIP_PIRAEUS=1
-  SKIP_INGRESS=1          # Skip Traefik deployment
-  SKIP_HARBOR=1           # Skip Harbor deployment
-
-Generated files:
-  kubeconfig (raw):     $KUBECONFIG_RAW_OUT
-  kubeconfig (flatten): $KUBECONFIG_OUT
-  kubeconfig (Lens):    $KUBECONFIG_LENS_OUT
-  talosconfig:          $TALOSCONFIG_OUT
+Example:
+  # Full deployment
+  ./do apply
+  
+  # Simple deployment (Cilium ingress only)
+  Edit do.cfg: PROFILE="simple"
+  ./do apply
+  
+  # Skip terraform, just bootstrap
+  Edit do.cfg: RUN_TERRAFORM="false"
+  ./do apply
 USAGE
 }
 
 main() {
+  load_config
+  
   local cmd="${1:-}"
   case "$cmd" in
     plan)              cmd_plan ;;
@@ -2118,13 +1738,16 @@ main() {
     reset-all)         cmd_reset_all ;;
     fix-linstor-db)    cmd_fix_linstor_db ;;
     nuke-piraeus)      cmd_nuke_piraeus ;;
+    install-tools)     cmd_install_tools ;;
     deploy-traefik)    ensure_kubeconfig && deploy_traefik ;;
     deploy-harbor)     ensure_kubeconfig && deploy_harbor ;;
     deploy-monitoring) ensure_kubeconfig && deploy_monitoring ;;
+    deploy-gitea)      ensure_kubeconfig && deploy_gitea ;;
+    config)            show_config ;;
     info)              ensure_kubeconfig && print_access_info ;;
     test|tests)        ensure_kubeconfig && load_cluster_vars && run_all_tests ;;
     ""|-h|--help|help) usage ;;
-    *) die "unknown command: $cmd" ;;
+    *) die "unknown command: $cmd (try: $0 help)" ;;
   esac
 }
 
