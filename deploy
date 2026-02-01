@@ -67,14 +67,14 @@ if command -v tmux >/dev/null && [[ -z "${TMUX:-}" ]]; then
             info "Starting tmux session with split panes..."
             # Kill existing session if any
             tmux kill-session -t deploy 2>/dev/null || true
-            # Create session with do script (67% width)
+            # Create session with do script (33% width on the left)
             tmux new-session -d -s deploy -n main -x "$(tput cols)" -y "$(tput lines)" \
                 "cd '$SCRIPT_DIR' && ./do $DO_CMD $*; echo ''; echo 'Press Enter to close...'; read"
-            # Split for dashboard (33% width on the right)
+            # Split for dashboard (67% width on the right)
             tmux split-window -h -t deploy:main \
                 "cd '$SCRIPT_DIR' && .venv/bin/python dashboard.py"
-            # Resize left pane to 67%
-            tmux resize-pane -t deploy:main.0 -x 67%
+            # Resize left pane (logs) to 33%, dashboard gets 67%
+            tmux resize-pane -t deploy:main.0 -x 33%
             tmux select-pane -t deploy:main.0
             tmux attach-session -t deploy
             exit 0
