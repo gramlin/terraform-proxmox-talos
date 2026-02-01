@@ -32,7 +32,7 @@ fi
 
 if ! .venv/bin/python -c "import rich" 2>/dev/null; then
     info "Installing dependencies..."
-    .venv/bin/pip install -q rich
+    .venv/bin/python -m pip install -q rich
 fi
 
 # Parse arguments
