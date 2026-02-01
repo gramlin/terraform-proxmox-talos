@@ -404,36 +404,106 @@ wait_pods_ready() {
       activity_shown=true
     fi
     
+    # Show live events for non-ready pods (latest event per pod)
+    if [[ $creating -gt 0 || ${#starting_pods[@]} -gt 0 || $pending -gt 0 ]]; then
+      local events_output=""
+      while IFS= read -r line; do
+        if [[ -n "$line" ]]; then
+          local pod_name=$(echo "$line" | awk '{print $1}')
+          local pod_status=$(echo "$line" | awk '{print $3}')
+          if [[ "$pod_status" != "Running" ]] || ! echo "$line" | awk '{print $2}' | grep -q "^[0-9]*/\1$"; then
+            # Get the latest event for this pod
+            local latest_event=$(kubectl get events -n "$ns" --field-selector involvedObject.name="$pod_name" --sort-by='.lastTimestamp' 2>/dev/null | tail -1 | awk '{$1=$2=$3=$4=""; print $0}' | sed 's/^ *//')
+            if [[ -n "$latest_event" && "$latest_event" != *"LASTSEEN"* ]]; then
+              local short_name=$(echo "$pod_name" | sed -E 's/-[a-z0-9]{8,10}-[a-z0-9]{5}$//; s/-[0-9]+$//')
+              # Truncate long messages
+              [[ ${#latest_event} -gt 60 ]] && latest_event="${latest_event:0:57}..."
+              events_output+="      📋 $short_name: $latest_event\n"
+            fi
+          fi
+        fi
+      done <<< "$pod_data"
+      if [[ -n "$events_output" ]]; then
+        printf "$events_output"
+      fi
+    fi
+    
     # Check if all ready
     if [[ $total -gt 0 && $actually_ready -eq $total && $pvc_pending -eq 0 ]]; then
       printf "  ✅ All %d pods ready (%dm%ds)\n" "$total" "$elapsed_min" "$elapsed_sec"
       return 0
     fi
     
-    # Show detailed diagnostics every 60 seconds for stuck items
-    if [[ $((elapsed - last_details_time)) -ge 60 && $elapsed -gt 0 ]]; then
+    # Show errors IMMEDIATELY when they occur
+    if [[ $failed -gt 0 ]]; then
+      echo ""
+      warn "❌ ERRORS DETECTED:"
+      while IFS= read -r line; do
+        if [[ -n "$line" ]] && echo "$line" | grep -qE "Error|CrashLoopBackOff|ImagePullBackOff|ErrImagePull"; then
+          local pod_name=$(echo "$line" | awk '{print $1}')
+          local pod_status=$(echo "$line" | awk '{print $3}')
+          local restarts=$(echo "$line" | awk '{print $4}')
+          local short_name=$(echo "$pod_name" | sed -E 's/-[a-z0-9]{8,10}-[a-z0-9]{5}$//; s/-[0-9]+$//')
+          
+          echo ""
+          echo "    ┌─ $short_name ($pod_status, restarts: $restarts)"
+          
+          # Show recent events
+          echo "    │ Events:"
+          kubectl get events -n "$ns" --field-selector involvedObject.name="$pod_name" --sort-by='.lastTimestamp' 2>/dev/null | tail -3 | while read -r event_line; do
+            [[ "$event_line" == *"LASTSEEN"* ]] && continue
+            local event_msg=$(echo "$event_line" | awk '{$1=$2=$3=$4=""; print $0}' | sed 's/^ *//')
+            [[ -n "$event_msg" ]] && echo "    │   $event_msg"
+          done
+          
+          # Show logs for CrashLoopBackOff
+          if [[ "$pod_status" == "CrashLoopBackOff" || "$pod_status" == "Error" ]]; then
+            echo "    │ Logs (last 10 lines):"
+            kubectl logs "$pod_name" -n "$ns" --tail=10 2>/dev/null | sed 's/^/    │   /' || echo "    │   (no logs available)"
+            
+            # Also check previous container logs
+            local prev_logs=$(kubectl logs "$pod_name" -n "$ns" --previous --tail=5 2>/dev/null || true)
+            if [[ -n "$prev_logs" ]]; then
+              echo "    │ Previous container logs:"
+              echo "$prev_logs" | sed 's/^/    │   /'
+            fi
+          fi
+          
+          # Show describe for ImagePull errors
+          if [[ "$pod_status" == "ImagePullBackOff" || "$pod_status" == "ErrImagePull" ]]; then
+            echo "    │ Image details:"
+            kubectl describe pod "$pod_name" -n "$ns" 2>/dev/null | grep -A2 "Image:" | head -3 | sed 's/^/    │   /'
+          fi
+          
+          echo "    └─"
+        fi
+      done <<< "$pod_data"
+    fi
+    
+    # Show PVC errors immediately
+    if [[ $pvc_pending -gt 0 ]]; then
+      for pvc_name in "${pending_pvcs[@]}"; do
+        local pvc_events=$(kubectl describe pvc "$pvc_name" -n "$ns" 2>/dev/null | grep -E "FailedBinding|ProvisioningFailed|no persistent volumes" || true)
+        if [[ -n "$pvc_events" ]]; then
+          echo ""
+          warn "💾 PVC ERROR: $pvc_name"
+          echo "$pvc_events" | head -3 | sed 's/^/    /'
+        fi
+      done
+    fi
+    
+    # Show detailed diagnostics every 60 seconds for stuck (but not erroring) items
+    if [[ $((elapsed - last_details_time)) -ge 60 && $elapsed -gt 0 && $failed -eq 0 ]]; then
       last_details_time=$elapsed
       
       if [[ $pvc_pending -gt 0 ]]; then
         echo ""
-        warn "PVC diagnostics:"
+        warn "PVC status (waiting):"
         for pvc_name in "${pending_pvcs[@]}"; do
           local events=$(kubectl describe pvc "$pvc_name" -n "$ns" 2>/dev/null | grep -A3 "Events:" | tail -3)
           if [[ -n "$events" ]]; then
             echo "    $pvc_name:"
             echo "$events" | sed 's/^/      /'
-          fi
-        done
-      fi
-      
-      if [[ $failed -gt 0 ]]; then
-        echo ""
-        warn "Pod diagnostics:"
-        for pod_info in "${failed_pods[@]}"; do
-          local pod_name=$(kubectl get pods -n "$ns" --no-headers 2>/dev/null | grep -E "Error|CrashLoopBackOff" | head -1 | awk '{print $1}')
-          if [[ -n "$pod_name" ]]; then
-            echo "    $pod_name:"
-            kubectl logs "$pod_name" -n "$ns" --tail=5 2>/dev/null | sed 's/^/      /' || true
           fi
         done
       fi
@@ -1507,6 +1577,9 @@ persistence:
       jobLog:
         storageClass: "$STORAGECLASS_NAME"
         size: 1Gi
+# Use Recreate strategy for components with RWO volumes to avoid Multi-Attach errors
+updateStrategy:
+  type: Recreate
 harborAdminPassword: "$HARBOR_ADMIN_PASSWORD"
 trivy:
   enabled: true
