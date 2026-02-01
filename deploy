@@ -75,6 +75,9 @@ if command -v tmux >/dev/null && [[ -z "${TMUX:-}" ]]; then
                 "cd '$SCRIPT_DIR' && .venv/bin/python dashboard.py"
             # Resize left pane (logs) to 33%, dashboard gets 67%
             tmux resize-pane -t deploy:main.0 -x 33%
+            # Set background color for both panes (#D9D7B6)
+            tmux select-pane -t deploy:main.0 -P 'bg=#D9D7B6,fg=#000000'
+            tmux select-pane -t deploy:main.1 -P 'bg=#D9D7B6,fg=#000000'
             tmux select-pane -t deploy:main.0
             tmux attach-session -t deploy
             exit 0
