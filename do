@@ -599,18 +599,21 @@ terraform_plan() {
 }
 
 # Terraform resource status file for dashboard
-TF_RESOURCES_FILE="$WORKDIR/.tf-resources.json"
-TALOS_STATUS_FILE="$WORKDIR/.talos-status.json"
-LINSTOR_STATUS_FILE="$WORKDIR/.linstor-status.json"
-PROXMOX_STATUS_FILE="$WORKDIR/.proxmox-status.json"
+TF_RESOURCES_FILE="${WORKDIR}/.tf-resources.json"
+TALOS_STATUS_FILE="${WORKDIR}/.talos-status.json"
+LINSTOR_STATUS_FILE="${WORKDIR}/.linstor-status.json"
+PROXMOX_STATUS_FILE="${WORKDIR}/.proxmox-status.json"
 
 # Initialize terraform resources tracking
 init_tf_resources() {
-  echo '{"resources":[],"status":"idle","timestamp":"'$(date -Iseconds)'"}' > "$TF_RESOURCES_FILE"
+  TF_RESOURCES_FILE="${WORKDIR}/.tf-resources.json"
+  echo '{"resources":[],"status":"running","timestamp":"'$(date -Iseconds)'"}' > "$TF_RESOURCES_FILE"
+  info "Tracking terraform resources to: $TF_RESOURCES_FILE"
 }
 
 # Initialize proxmox status tracking
 init_proxmox_status() {
+  PROXMOX_STATUS_FILE="${WORKDIR}/.proxmox-status.json"
   echo '{"vms":[],"status":"idle","timestamp":"'$(date -Iseconds)'"}' > "$PROXMOX_STATUS_FILE"
 }
 
@@ -638,23 +641,25 @@ update_proxmox_status() {
   local endpoint="${PROXMOX_VE_ENDPOINT:-}"
   local token="${PROXMOX_VE_API_TOKEN:-}"
   local node="${TF_VAR_proxmox_pve_node_name:-pve}"
+  local vm_prefix="${TF_VAR_prefix:-}"
   
   [[ -z "$endpoint" || -z "$token" ]] && return 0
   
   local auth_header="PVEAPIToken=${token}"
   
-  # Get VMs matching cure/talos/ctrl/worker pattern
+  # Get VMs from Proxmox API
   local vms_json
   vms_json=$(curl -sk -H "Authorization: ${auth_header}" \
     "${endpoint}/api2/json/nodes/${node}/qemu" 2>/dev/null) || return 0
   
   if command -v jq &>/dev/null && [[ -n "$vms_json" ]]; then
-    # Filter VMs by name pattern (cure-, talos, ctrl, worker, cp, wk)
-    echo "$vms_json" | jq --arg t "$(date -Iseconds)" '
+    # Filter VMs by prefix if set, otherwise show all
+    local filter_pattern="${vm_prefix:-.*}"
+    echo "$vms_json" | jq --arg t "$(date -Iseconds)" --arg pat "$filter_pattern" '
       {
         timestamp: $t,
         status: "running",
-        vms: [.data[] | select(.name | test("cure|talos|ctrl|worker|cp[0-9]|wk[0-9]"; "i")) | {
+        vms: [.data[] | select(.name | test($pat; "i")) | {
           vmid: .vmid,
           name: .name,
           status: .status,
@@ -741,6 +746,12 @@ update_tf_resource() {
   local action="$2"  # creating, modifying, destroying, complete, failed
   local message="${3:-}"
   
+  # Ensure file path is set
+  TF_RESOURCES_FILE="${TF_RESOURCES_FILE:-${WORKDIR}/.tf-resources.json}"
+  
+  # Create file if it doesn't exist
+  [[ -f "$TF_RESOURCES_FILE" ]] || echo '{"resources":[],"status":"running"}' > "$TF_RESOURCES_FILE"
+  
   # Read current file
   local current
   current=$(cat "$TF_RESOURCES_FILE" 2>/dev/null || echo '{"resources":[]}')
@@ -763,20 +774,21 @@ update_tf_resource() {
 
 # Parse terraform output and track resources
 tf_abbrev_and_track() {
-  local line action name
+  local line action name elapsed
   while IFS= read -r line; do
-    # Parse terraform resource lines (full resource names like proxmox_virtual_environment_vm.worker[0])
-    if [[ "$line" =~ ^([a-zA-Z0-9_.]+(\[[0-9]+\])?):\ (Creating|Modifying|Destroying|Refreshing)\.\.\.$ ]]; then
+    # Parse terraform resource lines - handle abbreviated names too (vm:worker[0])
+    # Format: "resource_name: Creating..." or "vm:worker[0]: Creating..."
+    if [[ "$line" =~ ^([a-zA-Z0-9_.:/-]+\[[0-9]+\]|[a-zA-Z0-9_.:/-]+):\ (Creating|Modifying|Destroying|Refreshing)\.\.\.$ ]]; then
       name="${BASH_REMATCH[1]}"
-      action="${BASH_REMATCH[3],,}"  # lowercase
-      update_tf_resource "$name" "${action}ing" ""
-    elif [[ "$line" =~ ^([a-zA-Z0-9_.]+(\[[0-9]+\])?):\ (Creation|Modifications|Destruction)\ complete ]]; then
+      action="${BASH_REMATCH[2],,}"  # lowercase: Creating -> creating
+      update_tf_resource "$name" "$action" ""
+    elif [[ "$line" =~ ^([a-zA-Z0-9_.:/-]+\[[0-9]+\]|[a-zA-Z0-9_.:/-]+):\ (Creation|Modifications|Destruction)\ complete ]]; then
       name="${BASH_REMATCH[1]}"
       update_tf_resource "$name" "complete" ""
-    elif [[ "$line" =~ ^([a-zA-Z0-9_.]+(\[[0-9]+\])?):\ Still\ (creating|modifying|destroying)\.\.\.\ \[([0-9]+[hms0-9]+)\ elapsed\] ]]; then
+    elif [[ "$line" =~ ^([a-zA-Z0-9_.:/-]+\[[0-9]+\]|[a-zA-Z0-9_.:/-]+):\ Still\ (creating|modifying|destroying)\.\.\.\ \[([0-9hms]+)\ elapsed\] ]]; then
       name="${BASH_REMATCH[1]}"
-      action="${BASH_REMATCH[3]}"
-      elapsed="${BASH_REMATCH[4]}"
+      action="${BASH_REMATCH[2]}"
+      elapsed="${BASH_REMATCH[3]}"
       update_tf_resource "$name" "$action" "$elapsed"
     fi
     

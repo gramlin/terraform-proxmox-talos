@@ -1922,16 +1922,53 @@ class ClusterDashboard:
                 )
         
         # Main area: steps on left, operations in middle, tests on right
-        layout["main"].split_row(Layout(name="left", ratio=2), Layout(name="middle", ratio=3), Layout(name="right", ratio=2))
+        # Dynamically build middle column based on what has data
+        tf_data = self._load_tf_resources()
+        talos_data = self._load_talos_status()
+        linstor_data = self._load_linstor_status()
+        proxmox_data = self._load_proxmox_status()
+        test_results = self._load_test_results()
+        
+        # Check what's active/complete
+        tf_active = tf_data.get("status") == "running" and tf_data.get("resources")
+        tf_complete = tf_data.get("status") == "complete"
+        talos_active = talos_data.get("status") == "running" and talos_data.get("operations")
+        talos_complete = talos_data.get("status") == "complete"
+        linstor_active = linstor_data.get("status") == "running" and linstor_data.get("operations")
+        linstor_complete = linstor_data.get("status") == "complete"
+        proxmox_has_vms = bool(proxmox_data.get("vms"))
+        tests_have_data = test_results and test_results.get("tests")
+        pvcs_active = any(s.description == "Storage Pool" and s.status == Status.DONE for s in self.steps)
+        
+        # Build middle panels list (only show active/incomplete)
+        middle_panels = []
+        if proxmox_has_vms:
+            middle_panels.append(("proxmox", self.render_proxmox_status()))
+        if tf_active or (not tf_complete and tf_data.get("resources")):
+            middle_panels.append(("terraform", self.render_tf_resources()))
+        if talos_active or (not talos_complete and talos_data.get("operations")):
+            middle_panels.append(("talos", self.render_talos_status()))
+        if linstor_active or (not linstor_complete and linstor_data.get("operations")):
+            middle_panels.append(("linstor", self.render_linstor_status()))
+        
+        # Build right panels (only show when has data)
+        right_panels = []
+        if tests_have_data:
+            right_panels.append(("tests", self.render_test_cards()))
+        if pvcs_active:
+            right_panels.append(("pvcs", self.render_pvc_table()))
+        
+        # Create layout based on what we have
+        if middle_panels and right_panels:
+            layout["main"].split_row(Layout(name="left", ratio=2), Layout(name="middle", ratio=3), Layout(name="right", ratio=2))
+        elif middle_panels:
+            layout["main"].split_row(Layout(name="left", ratio=2), Layout(name="middle", ratio=4))
+        elif right_panels:
+            layout["main"].split_row(Layout(name="left", ratio=3), Layout(name="right", ratio=2))
+        else:
+            layout["main"].split_row(Layout(name="left", ratio=1))
+        
         layout["left"].split_column(Layout(name="steps", ratio=4), Layout(name="details", ratio=1))
-        # Give each operation panel explicit minimum sizes
-        layout["middle"].split_column(
-            Layout(name="proxmox", minimum_size=6),
-            Layout(name="terraform", minimum_size=6),
-            Layout(name="talos", minimum_size=5),
-            Layout(name="linstor", minimum_size=5)
-        )
-        layout["right"].split_column(Layout(name="tests", ratio=3), Layout(name="pvcs", ratio=2))
         
         # Header with fancy animation
         layout["header"].update(Panel(self.render_header_fancy(), border_style="#444444", style=BG_STYLE))
@@ -1940,15 +1977,20 @@ class ClusterDashboard:
         layout["steps"].update(Panel(self.render_step_table(), title="Steps", border_style="#444444", style=BG_STYLE))
         layout["details"].update(Panel(self.render_checkpoint_details(), title="Active", border_style="#444444", style=BG_STYLE))
         
-        # Operation panels: Proxmox, Terraform, Talos, LINSTOR
-        layout["proxmox"].update(Panel(self.render_proxmox_status(), border_style="#444444", style=BG_STYLE))
-        layout["terraform"].update(Panel(self.render_tf_resources(), border_style="#444444", style=BG_STYLE))
-        layout["talos"].update(Panel(self.render_talos_status(), border_style="#444444", style=BG_STYLE))
-        layout["linstor"].update(Panel(self.render_linstor_status(), border_style="#444444", style=BG_STYLE))
+        # Middle panels (dynamic)
+        if middle_panels:
+            middle_layouts = [Layout(name=name, minimum_size=5) for name, _ in middle_panels]
+            layout["middle"].split_column(*middle_layouts)
+            for name, content in middle_panels:
+                layout[name].update(Panel(content, border_style="#444444", style=BG_STYLE))
         
-        # Tests and PVCs
-        layout["tests"].update(Panel(self.render_test_cards(), title="Tests", border_style="#444444", style=BG_STYLE))
-        layout["pvcs"].update(Panel(self.render_pvc_table(), border_style="#444444", style=BG_STYLE))
+        # Right panels (dynamic)
+        if right_panels:
+            right_layouts = [Layout(name=name, ratio=1) for name, _ in right_panels]
+            layout["right"].split_column(*right_layouts)
+            for name, content in right_panels:
+                title = "Tests" if name == "tests" else None
+                layout[name].update(Panel(content, title=title, border_style="#444444", style=BG_STYLE))
         
         # BLINKENLIGHTS! (only if enabled)
         if self.blinkenlicht:
