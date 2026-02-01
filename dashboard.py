@@ -1289,64 +1289,64 @@ class ClusterDashboard:
         
         text.append(f"╠{border}╣\n", style="#444444")
         
-        # Category rows with detailed info
+        # Category rows with detailed info - fixed width columns
         def render_category_row(label: str, steps_list: list, icon: str):
             done, wait, fail, tot = cat_stats(steps_list)
             text.append("║ ", style="#444444")
             text.append(f"{icon} ", style="#666666")
-            text.append(f"{label:12}", style="bold #000000")
-            text.append(" │ ", style="#444444")
+            text.append(f"{label:8}", style="bold #000000")
+            text.append("│", style="#444444")
             
-            # LED indicators for each step
-            for i, step in enumerate(steps_list):
-                if step.status == Status.SUCCESS:
-                    text.append("●", style="#33FF33")
-                elif step.status == Status.WAITING:
-                    on = (self.frame + i) % 4 < 2
-                    text.append("●" if on else "○", style="#FFAA33" if on else LED_DIM)
-                elif step.status == Status.FAILED:
-                    on = self.frame % 2 == 0
-                    text.append("●" if on else "○", style="#FF3333" if on else "#880000")
+            # LED indicators for each step (fixed 6 slots)
+            for i in range(6):
+                if i < len(steps_list):
+                    step = steps_list[i]
+                    if step.status == Status.SUCCESS:
+                        text.append(" ●", style="#33FF33")
+                    elif step.status == Status.WAITING:
+                        on = (self.frame + i) % 4 < 2
+                        text.append(" ●" if on else " ○", style="#FFAA33" if on else LED_DIM)
+                    elif step.status == Status.FAILED:
+                        on = self.frame % 2 == 0
+                        text.append(" ●" if on else " ○", style="#FF3333" if on else "#880000")
+                    else:
+                        text.append(" ○", style=LED_DIM)
                 else:
-                    text.append("○", style=LED_DIM)
-                text.append(" ", style="#444444")
+                    text.append("  ", style="#444444")
             
-            # Pad LEDs
-            for _ in range(8 - len(steps_list)):
-                text.append("  ", style="#444444")
+            text.append(" │", style="#444444")
             
-            text.append("│ ", style="#444444")
-            
-            # Step names with status
-            for step in steps_list[:4]:  # Show up to 4 step names
-                if step.status == Status.SUCCESS:
-                    text.append(f"{step.description[:8]:8} ", style="#008800")
-                elif step.status == Status.WAITING:
-                    text.append(f"{step.description[:8]:8} ", style="#AA6600")
-                elif step.status == Status.FAILED:
-                    text.append(f"{step.description[:8]:8} ", style="#CC0000")
+            # Step names with status (fixed 5 slots, 9 chars each)
+            for i in range(5):
+                if i < len(steps_list):
+                    step = steps_list[i]
+                    name = step.description[:9].ljust(9)
+                    if step.status == Status.SUCCESS:
+                        text.append(f" {name}", style="#008800")
+                    elif step.status == Status.WAITING:
+                        text.append(f" {name}", style="#AA6600")
+                    elif step.status == Status.FAILED:
+                        text.append(f" {name}", style="#CC0000")
+                    else:
+                        text.append(f" {name}", style="#666666")
                 else:
-                    text.append(f"{step.description[:8]:8} ", style="#666666")
+                    text.append(" " * 10, style="#444444")
             
-            # Pad names
-            for _ in range(4 - min(4, len(steps_list))):
-                text.append(" " * 9, style="#444444")
+            text.append(" │", style="#444444")
             
-            text.append("│ ", style="#444444")
-            
-            # Summary
+            # Summary (fixed width)
             if done == tot:
-                text.append("✓ DONE ", style="#33FF33 bold")
+                text.append(" ✓ DONE", style="#33FF33 bold")
             elif fail > 0:
-                text.append("✗ FAIL ", style="#FF3333 bold")
+                text.append(" ✗ FAIL", style="#FF3333 bold")
             elif wait > 0:
                 spinner = DOTS_FRAMES[self.frame % len(DOTS_FRAMES)]
-                text.append(f"{spinner} RUN  ", style="#FFAA33 bold")
+                text.append(f" {spinner} RUN ", style="#FFAA33 bold")
             else:
-                text.append("○ WAIT ", style="#666666")
+                text.append(" ○ WAIT", style="#666666")
             
-            text.append(f"{done}/{tot}", style="#000000")
-            text.append(" " * 5 + "║\n", style="#444444")
+            text.append(f" {done}/{tot}".ljust(6), style="#000000")
+            text.append("║\n", style="#444444")
         
         render_category_row("INFRA", infra_steps, "🏗")
         render_category_row("TALOS", talos_steps, "🖥")
