@@ -1320,13 +1320,13 @@ class ClusterDashboard:
             # Step names with status
             for step in steps_list[:4]:  # Show up to 4 step names
                 if step.status == Status.SUCCESS:
-                    text.append(f"{step.label[:8]:8} ", style="#008800")
+                    text.append(f"{step.description[:8]:8} ", style="#008800")
                 elif step.status == Status.WAITING:
-                    text.append(f"{step.label[:8]:8} ", style="#AA6600")
+                    text.append(f"{step.description[:8]:8} ", style="#AA6600")
                 elif step.status == Status.FAILED:
-                    text.append(f"{step.label[:8]:8} ", style="#CC0000")
+                    text.append(f"{step.description[:8]:8} ", style="#CC0000")
                 else:
-                    text.append(f"{step.label[:8]:8} ", style="#666666")
+                    text.append(f"{step.description[:8]:8} ", style="#666666")
             
             # Pad names
             for _ in range(4 - min(4, len(steps_list))):
