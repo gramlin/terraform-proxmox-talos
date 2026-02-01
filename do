@@ -774,18 +774,19 @@ update_tf_resource() {
 
 # Parse terraform output and track resources
 tf_abbrev_and_track() {
-  local line action name elapsed
+  local line name action elapsed
   while IFS= read -r line; do
-    # Parse terraform resource lines - handle abbreviated names too (vm:worker[0])
-    # Format: "resource_name: Creating..." or "vm:worker[0]: Creating..."
-    if [[ "$line" =~ ^([a-zA-Z0-9_.:/-]+\[[0-9]+\]|[a-zA-Z0-9_.:/-]+):\ (Creating|Modifying|Destroying|Refreshing)\.\.\.$ ]]; then
+    # Match: "resource_name: Creating..." or "resource_name[N]: Creating..."
+    if [[ "$line" =~ ^([^:]+):\ (Creating|Modifying|Destroying|Refreshing)\.\.\. ]]; then
       name="${BASH_REMATCH[1]}"
-      action="${BASH_REMATCH[2],,}"  # lowercase: Creating -> creating
+      action="${BASH_REMATCH[2],,}"
       update_tf_resource "$name" "$action" ""
-    elif [[ "$line" =~ ^([a-zA-Z0-9_.:/-]+\[[0-9]+\]|[a-zA-Z0-9_.:/-]+):\ (Creation|Modifications|Destruction)\ complete ]]; then
+    # Match: "resource_name: Creation complete after Xs"
+    elif [[ "$line" =~ ^([^:]+):\ (Creation|Modifications|Destruction)\ complete ]]; then
       name="${BASH_REMATCH[1]}"
       update_tf_resource "$name" "complete" ""
-    elif [[ "$line" =~ ^([a-zA-Z0-9_.:/-]+\[[0-9]+\]|[a-zA-Z0-9_.:/-]+):\ Still\ (creating|modifying|destroying)\.\.\.\ \[([0-9hms]+)\ elapsed\] ]]; then
+    # Match: "resource_name: Still creating... [01m30s elapsed]"
+    elif [[ "$line" =~ ^([^:]+):\ Still\ ([a-z]+)\.\.\.[[:space:]]*\[([0-9hms]+)[[:space:]]elapsed\] ]]; then
       name="${BASH_REMATCH[1]}"
       action="${BASH_REMATCH[2]}"
       elapsed="${BASH_REMATCH[3]}"
@@ -840,8 +841,10 @@ terraform_apply() {
     # shellcheck disable=SC2086
     ( cd "$WORKDIR" && terraform apply -auto-approve ${var_args} ) 2>&1 | tf_abbrev_and_track
   fi
-  # Mark all as complete
-  echo '{"resources":[],"status":"complete","timestamp":"'$(date -Iseconds)'"}' > "$TF_RESOURCES_FILE"
+  # Mark terraform as complete (keep resources for display)
+  if command -v jq &>/dev/null && [[ -f "$TF_RESOURCES_FILE" ]]; then
+    jq '.status = "complete"' "$TF_RESOURCES_FILE" > "$TF_RESOURCES_FILE.tmp" && mv "$TF_RESOURCES_FILE.tmp" "$TF_RESOURCES_FILE"
+  fi
 }
 
 terraform_destroy() {
