@@ -1674,7 +1674,7 @@ deploy_gitea() {
 
   # Adopt orphaned resources by adding Helm annotations/labels
   local release_name="gitea"
-  for resource in "svc/gitea-http" "svc/gitea-ssh" "deploy/gitea" "pvc/gitea" "sts/gitea"; do
+  for resource in "svc/gitea-http" "svc/gitea-ssh" "deploy/gitea" "pvc/gitea" "sts/gitea" "ingress/gitea"; do
     if kubectl get "$resource" -n "$ns" &>/dev/null; then
       local has_release
       has_release=$(kubectl get "$resource" -n "$ns" -o jsonpath='{.metadata.annotations.meta\.helm\.sh/release-name}' 2>/dev/null || echo "")
