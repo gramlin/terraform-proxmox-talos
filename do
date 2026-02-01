@@ -83,7 +83,7 @@ LOG_FILE="${LOG_FILE:-$WORKDIR/do.log}"
 LOG_ENABLED="${LOG_ENABLED:-0}"  # Set LOG_ENABLED=1 to enable file logging
 
 # -----------------------------
-# Pretty logging
+# Pretty logging & progress
 # -----------------------------
 ts() { date +"%Y-%m-%d %H:%M:%S"; }
 
@@ -107,6 +107,95 @@ step() { _log ""; _log "### $* ###"; }
 info() { _log "INFO: $*"; }
 warn() { _log_err "WARN: $*"; }
 die() { _log_err "ERROR: $*"; exit 1; }
+
+# Progress spinner for long operations
+SPINNER_PID=""
+spinner_start() {
+  local msg="${1:-Working...}"
+  (
+    local spin='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
+    local i=0
+    while true; do
+      printf "\r  %s %s" "${spin:i++%${#spin}:1}" "$msg"
+      sleep 0.1
+    done
+  ) &
+  SPINNER_PID=$!
+  disown
+}
+
+spinner_stop() {
+  if [[ -n "$SPINNER_PID" ]]; then
+    kill "$SPINNER_PID" 2>/dev/null || true
+    SPINNER_PID=""
+    printf "\r\033[K"  # Clear line
+  fi
+}
+
+# Progress status line (updates in place)
+progress() {
+  printf "\r\033[K  → %s" "$*"
+}
+
+progress_done() {
+  printf "\r\033[K  ✓ %s\n" "$*"
+}
+
+progress_fail() {
+  printf "\r\033[K  ✗ %s\n" "$*"
+}
+
+# Wait with progress for a condition
+# Usage: wait_progress "message" <timeout_seconds> <check_command>
+wait_progress() {
+  local msg="$1"
+  local timeout="$2"
+  shift 2
+  local check_cmd=("$@")
+  
+  local start=$SECONDS
+  local elapsed=0
+  
+  while true; do
+    elapsed=$((SECONDS - start))
+    progress "$msg (${elapsed}s/${timeout}s)"
+    
+    if "${check_cmd[@]}" >/dev/null 2>&1; then
+      progress_done "$msg (${elapsed}s)"
+      return 0
+    fi
+    
+    if [[ $elapsed -ge $timeout ]]; then
+      progress_fail "$msg (timeout after ${elapsed}s)"
+      return 1
+    fi
+    
+    sleep 2
+  done
+}
+
+# Show pod status summary
+show_pod_progress() {
+  local ns="${1:-piraeus-datastore}"
+  local label="${2:-}"
+  
+  local selector=""
+  [[ -n "$label" ]] && selector="-l $label"
+  
+  local total ready pending failed
+  total=$(kubectl get pods -n "$ns" $selector --no-headers 2>/dev/null | wc -l | tr -d ' ')
+  ready=$(kubectl get pods -n "$ns" $selector --no-headers 2>/dev/null | grep -c "Running" || echo 0)
+  pending=$(kubectl get pods -n "$ns" $selector --no-headers 2>/dev/null | grep -cE "Pending|Init|ContainerCreating" || echo 0)
+  failed=$(kubectl get pods -n "$ns" $selector --no-headers 2>/dev/null | grep -cE "Error|CrashLoop|Failed" || echo 0)
+  
+  if [[ $failed -gt 0 ]]; then
+    progress "Pods: $ready/$total ready, $pending pending, $failed FAILED"
+  elif [[ $pending -gt 0 ]]; then
+    progress "Pods: $ready/$total ready, $pending pending..."
+  else
+    progress "Pods: $ready/$total ready"
+  fi
+}
 
 need() {
   command -v "$1" >/dev/null 2>&1 || die "Missing dependency: $1"
@@ -477,11 +566,12 @@ test_linstor_nodes_registered() {
   
   local registered_nodes
   registered_nodes=$(kubectl -n piraeus-datastore exec "$controller_pod" -- linstor node list 2>/dev/null | grep -c "SATELLITE" || echo "0")
+  registered_nodes=$(echo "$registered_nodes" | tr -d ' \n')
   
   # Use satellite pod count as expected if WORKER_NODE_NAMES not available
   local expected_nodes=${#WORKER_NODE_NAMES[@]}
   if [[ $expected_nodes -eq 0 ]]; then
-    expected_nodes=$(kubectl get pods -n piraeus-datastore -l app.kubernetes.io/component=linstor-satellite --no-headers 2>/dev/null | wc -l | tr -d ' ')
+    expected_nodes=$(kubectl get pods -n piraeus-datastore -l app.kubernetes.io/component=linstor-satellite --no-headers 2>/dev/null | wc -l | tr -d ' \n')
   fi
   
   if [[ $registered_nodes -gt 0 ]] && [[ $registered_nodes -eq $expected_nodes ]]; then
@@ -1272,59 +1362,94 @@ wait_linstor_ready() {
   step "piraeus wait datastore"
   # Wait for LinstorCluster to become Available (controller reachable).
   local attempt=1
+  local start_time=$SECONDS
+  local timeout_seconds=900  # 15 minutes
+  
+  info "Waiting for LinstorCluster to become Available..."
+  
   while true; do
-    if kubectl wait linstorcluster.piraeus.io/linstor -n piraeus-datastore --timeout="$WAIT_LINSTOR_AVAILABLE_TIMEOUT" --for=condition=Available; then
-      info "LinstorCluster/linstor is Available."
+    local elapsed=$((SECONDS - start_time))
+    local elapsed_min=$((elapsed / 60))
+    local elapsed_sec=$((elapsed % 60))
+    
+    # Get current status
+    local controller_status satellite_count satellite_ready linstor_status
+    controller_status=$(kubectl get pods -n piraeus-datastore -l app.kubernetes.io/component=linstor-controller --no-headers 2>/dev/null | awk '{print $3}' | head -1 || echo "Unknown")
+    satellite_count=$(kubectl get pods -n piraeus-datastore -l app.kubernetes.io/component=linstor-satellite --no-headers 2>/dev/null | wc -l | tr -d ' ')
+    satellite_ready=$(kubectl get pods -n piraeus-datastore -l app.kubernetes.io/component=linstor-satellite --no-headers 2>/dev/null | grep -c "2/2.*Running" || echo 0)
+    linstor_status=$(kubectl get linstorcluster linstor -n piraeus-datastore -o jsonpath='{.status.conditions[?(@.type=="Available")].status}' 2>/dev/null || echo "Unknown")
+    
+    # Show progress
+    printf "\r\033[K  [%02d:%02d] Controller: %-15s | Satellites: %s/%s ready | LinstorCluster: %s" \
+      "$elapsed_min" "$elapsed_sec" "$controller_status" "$satellite_ready" "$satellite_count" "$linstor_status"
+    
+    # Check if available
+    if [[ "$linstor_status" == "True" ]]; then
+      echo ""  # newline
+      progress_done "LinstorCluster is Available (${elapsed_min}m ${elapsed_sec}s)"
       return 0
     fi
-
-    warn "LinstorCluster did not become Available within timeout. Dumping diagnostics."
-    kubectl -n piraeus-datastore get pods -o wide || true
     
-    # Run diagnostics
-    local has_image_issues=0
-    diagnose_pod_issues || has_image_issues=$?
+    # Check timeout
+    if [[ $elapsed -ge $timeout_seconds ]]; then
+      echo ""  # newline
+      progress_fail "Timeout waiting for LinstorCluster (${elapsed_min}m ${elapsed_sec}s)"
+      break
+    fi
     
-    kubectl -n piraeus-datastore describe linstorcluster.piraeus.io/linstor || true
-    kubectl -n piraeus-datastore get linstorcluster.piraeus.io/linstor -o yaml || true
-
-    local controller_logs
-    controller_logs="$(kubectl -n piraeus-datastore logs -l app.kubernetes.io/component=linstor-controller --all-containers --tail=300 2>/dev/null || true)"
-    [[ -n "$controller_logs" ]] && echo "$controller_logs"
-    kubectl -n piraeus-datastore logs -l app.kubernetes.io/component=linstor-satellite --all-containers --tail=200 || true
-
-    # Check for DB migration issues first
-    if [[ "$AUTO_RESET_LINSTOR_DB" == "1" && "$attempt" -eq 1 ]]; then
-      if echo "$controller_logs" | grep -qiE 'rollback has to be done|Database initialization error|Cannot perform Migration'; then
-        warn "Detected LINSTOR DB migration failure. Resetting internal DB and retrying once."
-        reset_linstor_internal_db
-        kubectl -n piraeus-datastore delete pod -l app.kubernetes.io/component=linstor-controller --ignore-not-found >/dev/null 2>&1 || true
-        attempt=$((attempt + 1))
-        sleep 10
-        continue
+    # Check for controller crash
+    if [[ "$controller_status" == "CrashLoopBackOff" || "$controller_status" == "Error" ]]; then
+      local controller_logs
+      controller_logs="$(kubectl -n piraeus-datastore logs -l app.kubernetes.io/component=linstor-controller --all-containers --tail=50 2>/dev/null || true)"
+      
+      # Check for DB migration issues
+      if [[ "$AUTO_RESET_LINSTOR_DB" == "1" && "$attempt" -eq 1 ]]; then
+        if echo "$controller_logs" | grep -qiE 'rollback has to be done|Database initialization error|Cannot perform Migration'; then
+          echo ""  # newline
+          warn "Detected LINSTOR DB migration failure. Resetting internal DB and retrying once."
+          reset_linstor_db_migration
+          attempt=$((attempt + 1))
+          sleep 10
+          continue
+        fi
       fi
     fi
-
-    # Check for image pull issues and try fallback version
-    if [[ "$has_image_issues" -eq 1 && "$PIRAEUS_VERSION_FALLBACK_ENABLED" == "1" ]]; then
-      if load_next_piraeus_version; then
-        warn "Image pull failed. Retrying with older Piraeus version..."
-        warn "Cleaning up failed installation..."
-        kubectl delete linstorcluster linstor --ignore-not-found >/dev/null 2>&1 || true
-        kubectl delete linstorsatelliteconfigurations.piraeus.io --all --ignore-not-found >/dev/null 2>&1 || true
-        kubectl -n piraeus-datastore delete pods --all --ignore-not-found >/dev/null 2>&1 || true
-        sleep 5
-        
-        # Reinstall with new version
-        piraeus_apply_cluster_resources
-        attempt=1
-        sleep 10
-        continue
-      fi
-    fi
-
-    die "LinstorCluster/linstor not Available"
+    
+    sleep 3
   done
+
+  # Timeout reached - dump diagnostics
+  warn "LinstorCluster did not become Available within timeout. Dumping diagnostics."
+  kubectl -n piraeus-datastore get pods -o wide || true
+  
+  # Run diagnostics
+  local has_image_issues=0
+  diagnose_pod_issues || has_image_issues=$?
+  
+  kubectl -n piraeus-datastore describe linstorcluster.piraeus.io/linstor || true
+
+  local controller_logs
+  controller_logs="$(kubectl -n piraeus-datastore logs -l app.kubernetes.io/component=linstor-controller --all-containers --tail=300 2>/dev/null || true)"
+  [[ -n "$controller_logs" ]] && echo "$controller_logs"
+
+  # Check for image pull issues and try fallback version
+  if [[ "$has_image_issues" -eq 1 && "$PIRAEUS_VERSION_FALLBACK_ENABLED" == "1" ]]; then
+    if load_next_piraeus_version; then
+      warn "Image pull failed. Retrying with older Piraeus version..."
+      warn "Cleaning up failed installation..."
+      kubectl delete linstorcluster linstor --ignore-not-found >/dev/null 2>&1 || true
+      kubectl delete linstorsatelliteconfigurations.piraeus.io --all --ignore-not-found >/dev/null 2>&1 || true
+      kubectl -n piraeus-datastore delete pods --all --ignore-not-found >/dev/null 2>&1 || true
+      sleep 5
+      
+      # Reinstall with new version
+      piraeus_apply_cluster_resources
+      wait_linstor_ready  # Recursive retry with new version
+      return $?
+    fi
+  fi
+
+  die "LinstorCluster/linstor not Available"
 }
 
 patch_satellites_for_talos() {
