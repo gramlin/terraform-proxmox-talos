@@ -411,7 +411,10 @@ wait_pods_ready() {
         if [[ -n "$line" ]]; then
           local pod_name=$(echo "$line" | awk '{print $1}')
           local pod_status=$(echo "$line" | awk '{print $3}')
-          if [[ "$pod_status" != "Running" ]] || ! echo "$line" | awk '{print $2}' | grep -q "^[0-9]*/\1$"; then
+          local pod_ready=$(echo "$line" | awk '{print $2}')
+          local containers_ready=${pod_ready%/*}
+          local containers_total=${pod_ready#*/}
+          if [[ "$pod_status" != "Running" ]] || [[ "$containers_ready" != "$containers_total" ]]; then
             # Get the latest event for this pod
             local latest_event=$(kubectl get events -n "$ns" --field-selector involvedObject.name="$pod_name" --sort-by='.lastTimestamp' 2>/dev/null | tail -1 | awk '{$1=$2=$3=$4=""; print $0}' | sed 's/^ *//')
             if [[ -n "$latest_event" && "$latest_event" != *"LASTSEEN"* ]]; then
@@ -1085,6 +1088,7 @@ provisioner: linstor.csi.linbit.com
 parameters:
   linstor.csi.linbit.com/storagePool: ${POOL_NAME}
   linstor.csi.linbit.com/autoPlace: "${AUTO_PLACE}"
+  csi.storage.k8s.io/fstype: ext4
 allowVolumeExpansion: true
 reclaimPolicy: Delete
 volumeBindingMode: WaitForFirstConsumer
@@ -1286,6 +1290,25 @@ configure_linstor_storage_pools() {
     
     sleep 2
     elapsed=$((elapsed + 2))
+  done
+
+  # Wait for nodes to be registered and ONLINE in LINSTOR
+  local expected_nodes=${#WORKER_NODE_NAMES[@]}
+  info "Waiting for $expected_nodes nodes to be ONLINE in LINSTOR..."
+  timeout=180 elapsed=0
+  while [[ $elapsed -lt $timeout ]]; do
+    local online_nodes
+    online_nodes=$(kubectl -n piraeus-datastore exec "$linstor_pod" -- linstor node list 2>/dev/null | grep -c "Online" || echo "0")
+    online_nodes=$(echo "$online_nodes" | tr -d ' \n')
+    
+    if [[ "$online_nodes" -ge "$expected_nodes" ]]; then
+      info "✓ All $online_nodes nodes are ONLINE in LINSTOR"
+      break
+    fi
+    
+    info "  Waiting... ($online_nodes/$expected_nodes nodes online)"
+    sleep 5
+    elapsed=$((elapsed + 5))
   done
 
   for i in "${!WORKER_NODE_NAMES[@]}"; do
