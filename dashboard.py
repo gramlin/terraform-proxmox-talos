@@ -44,8 +44,9 @@ except ImportError:
     from rich.style import Style
 
 # Background color
-BG_COLOR = "#F2F0EF"
+BG_COLOR = "#D9D7B6"
 BG_STYLE = Style(bgcolor=BG_COLOR)
+TEXT_COLOR = "#000000"
 
 
 class Status(Enum):
@@ -58,12 +59,12 @@ class Status(Enum):
 
 
 STATUS_ICONS = {
-    Status.PENDING: ("○", "dim"),
-    Status.RUNNING: ("◉", "yellow bold"),
-    Status.WAITING: ("◎", "cyan"),
-    Status.SUCCESS: ("●", "green bold"),
-    Status.FAILED: ("●", "red bold"),
-    Status.SKIPPED: ("○", "dim"),
+    Status.PENDING: ("○", "#666666"),
+    Status.RUNNING: ("◉", "#CC8800 bold"),
+    Status.WAITING: ("◎", "#0066AA bold"),
+    Status.SUCCESS: ("●", "#008800 bold"),
+    Status.FAILED: ("●", "#CC0000 bold"),
+    Status.SKIPPED: ("○", "#666666"),
 }
 
 # Spinner frames for active items
@@ -71,11 +72,11 @@ SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇",
 BLINK_FRAMES = ["◐", "◓", "◑", "◒"]
 
 CHECKPOINT_STYLES = {
-    Status.PENDING: ("□", "dim"),
-    Status.RUNNING: ("▣", "yellow"),
-    Status.WAITING: ("◧", "cyan"),
-    Status.SUCCESS: ("■", "green"),
-    Status.FAILED: ("■", "red"),
+    Status.PENDING: ("□", "#666666"),
+    Status.RUNNING: ("▣", "#CC8800"),
+    Status.WAITING: ("◧", "#0066AA"),
+    Status.SUCCESS: ("■", "#008800"),
+    Status.FAILED: ("■", "#CC0000"),
 }
 
 
@@ -860,9 +861,9 @@ class ClusterDashboard:
             if cp.status == Status.WAITING:
                 # Animated spinner for waiting checkpoints
                 icon = BLINK_FRAMES[(self.frame + i) % len(BLINK_FRAMES)]
-                text.append(icon, style="cyan bold")
+                text.append(icon, style="#0066AA bold")
             else:
-                icon, style = CHECKPOINT_STYLES.get(cp.status, ("○", "dim"))
+                icon, style = CHECKPOINT_STYLES.get(cp.status, ("○", "#666666"))
                 text.append(icon, style=style)
         return text
 
@@ -870,44 +871,44 @@ class ClusterDashboard:
         """Render step icon with animation for waiting states"""
         if step.status == Status.WAITING:
             icon = SPINNER_FRAMES[self.frame % len(SPINNER_FRAMES)]
-            return Text(icon, style="cyan bold")
+            return Text(icon, style="#0066AA bold")
         icon, style = STATUS_ICONS[step.status]
         return Text(icon, style=style)
 
     def render_step_table(self) -> Table:
-        table = Table(show_header=True, header_style="bold cyan", border_style="blue", expand=True, box=None)
+        table = Table(show_header=True, header_style="bold #000000", border_style="#444444", expand=True, box=None)
         table.add_column("", width=2)
-        table.add_column("Step", width=10)
+        table.add_column("Step", width=10, style="#000000")
         table.add_column("Checks", width=16)
         table.add_column("Status", width=14)
         for step in self.steps:
-            status_style = "green" if step.status == Status.SUCCESS else "red" if step.status == Status.FAILED else "cyan" if step.status == Status.WAITING else "dim"
-            table.add_row(self.render_step_icon(step), step.description, self.render_checkpoints_row(step.checkpoints), Text(step.message or "", style=status_style))
+            status_style = "#008800" if step.status == Status.SUCCESS else "#CC0000" if step.status == Status.FAILED else "#0066AA" if step.status == Status.WAITING else "#666666"
+            table.add_row(self.render_step_icon(step), Text(step.description, style="#000000"), self.render_checkpoints_row(step.checkpoints), Text(step.message or "", style=status_style))
         return table
 
     def render_checkpoint_details(self) -> Table:
-        table = Table(show_header=False, border_style="dim", expand=True, box=None)
-        table.add_column("", width=12)
-        table.add_column("", width=8)
+        table = Table(show_header=False, border_style="#444444", expand=True, box=None)
+        table.add_column("", width=12, style="#000000")
+        table.add_column("", width=8, style="#000000")
         table.add_column("", width=2)
-        table.add_column("", width=8)
+        table.add_column("", width=8, style="#444444")
         for step in self.steps:
             if step.status in (Status.WAITING, Status.FAILED, Status.RUNNING) or any(cp.status in (Status.WAITING, Status.FAILED) for cp in step.checkpoints):
                 for cp in step.checkpoints:
                     if cp.status != Status.PENDING:
                         icon, style = CHECKPOINT_STYLES[cp.status]
-                        table.add_row(Text(step.description[:12], style="cyan"), cp.name[:8], Text(icon, style=style), Text(cp.message[:8] if cp.message else "", style="dim"))
+                        table.add_row(Text(step.description[:12], style="#0066AA"), cp.name[:8], Text(icon, style=style), Text(cp.message[:8] if cp.message else "", style="#444444"))
         return table
 
     def render_pvc_table(self) -> Table:
-        table = Table(title="💾 PVCs", show_header=False, border_style="dim", box=None)
-        table.add_column("", width=22)
+        table = Table(title="💾 PVCs", show_header=False, border_style="#444444", box=None, title_style="#000000")
+        table.add_column("", width=22, style="#000000")
         table.add_column("", width=6)
-        table.add_column("", width=5)
+        table.add_column("", width=5, style="#444444")
         for pvc in self._get_pvcs():
             st = pvc["status"]
-            style = "green" if st == "Bound" else "yellow" if st == "Pending" else "red"
-            table.add_row(Text(pvc["name"][:22], style="dim"), Text(st[:6], style=style), pvc["size"][:5])
+            style = "#008800" if st == "Bound" else "#CC8800" if st == "Pending" else "#CC0000"
+            table.add_row(Text(pvc["name"][:22], style="#000000"), Text(st[:6], style=style), pvc["size"][:5])
         return table
 
     def render_progress_bar(self) -> Text:
@@ -922,10 +923,10 @@ class ClusterDashboard:
         pending_chars = bar_width - done_chars - waiting_chars
         
         bar = Text()
-        bar.append("█" * done_chars, style="green")
-        bar.append("▓" * waiting_chars, style="cyan")
-        bar.append("░" * pending_chars, style="dim")
-        bar.append(f" {done}/{total}", style="bold")
+        bar.append("█" * done_chars, style="#008800")
+        bar.append("▓" * waiting_chars, style="#0066AA")
+        bar.append("░" * pending_chars, style="#888888")
+        bar.append(f" {done}/{total}", style="bold #000000")
         return bar
 
     def render_layout(self) -> Layout:
@@ -935,22 +936,22 @@ class ClusterDashboard:
         layout["right"].split_column(Layout(name="details"), Layout(name="pvcs"))
         header = Text()
         header.append("🚀 ", style="bold")
-        header.append("Talos Cluster Dashboard", style=f"bold #333333 on {BG_COLOR}")
-        header.append("  │  ", style="dim")
+        header.append("Talos Cluster Dashboard", style=f"bold #000000 on {BG_COLOR}")
+        header.append("  │  ", style="#444444")
         header.append_text(self.render_progress_bar())
-        header.append(f"  │  {os.path.basename(self.kubeconfig)}", style="dim")
-        layout["header"].update(Panel(header, border_style="#888888", style=BG_STYLE))
-        layout["left"].update(Panel(self.render_step_table(), title="Steps", border_style="#5588AA", style=BG_STYLE))
-        layout["details"].update(Panel(self.render_checkpoint_details(), title="Active Checks", border_style="#888888", style=BG_STYLE))
-        layout["pvcs"].update(Panel(self.render_pvc_table(), border_style="#888888", style=BG_STYLE))
+        header.append(f"  │  {os.path.basename(self.kubeconfig)}", style="#444444")
+        layout["header"].update(Panel(header, border_style="#444444", style=BG_STYLE))
+        layout["left"].update(Panel(self.render_step_table(), title="Steps", border_style="#444444", style=BG_STYLE))
+        layout["details"].update(Panel(self.render_checkpoint_details(), title="Active Checks", border_style="#444444", style=BG_STYLE))
+        layout["pvcs"].update(Panel(self.render_pvc_table(), border_style="#444444", style=BG_STYLE))
         legend = Text()
-        legend.append(f"  {time.strftime('%H:%M:%S')}  │  ", style="dim")
-        legend.append("□", style="dim"); legend.append(" pending  ", style="dim")
-        legend.append("◧", style="cyan"); legend.append(" wait  ", style="dim")
-        legend.append("■", style="green"); legend.append(" done  ", style="dim")
-        legend.append("■", style="red"); legend.append(" fail  ", style="dim")
-        legend.append("│  Ctrl+C exit", style="dim")
-        layout["footer"].update(Panel(legend, border_style="#888888", style=BG_STYLE))
+        legend.append(f"  {time.strftime('%H:%M:%S')}  │  ", style="#444444")
+        legend.append("□", style="#666666"); legend.append(" pending  ", style="#000000")
+        legend.append("◧", style="#0066AA"); legend.append(" wait  ", style="#000000")
+        legend.append("■", style="#008800"); legend.append(" done  ", style="#000000")
+        legend.append("■", style="#CC0000"); legend.append(" fail  ", style="#000000")
+        legend.append("│  Ctrl+C exit", style="#444444")
+        layout["footer"].update(Panel(legend, border_style="#444444", style=BG_STYLE))
         return layout
 
     def update_all_statuses(self):
