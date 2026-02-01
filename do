@@ -2,12 +2,14 @@
 # do - Talos+Proxmox Terraform helper + Piraeus/LINSTOR bootstrap
 #
 # Commands:
-#   plan         Terraform plan only (writes tfplan)
-#   apply        Terraform apply + bootstrap (no saved plan)
-#   plan-apply   Terraform plan (tfplan) + terraform apply tfplan + bootstrap
-#   destroy      Terraform destroy only
-#   reset-piraeus Uninstall Piraeus/LINSTOR from current cluster (best-effort)
-#   reset-all    reset-piraeus + terraform destroy + cleanup generated local files (does NOT delete terraform state by default)
+#   plan           Terraform plan only (writes tfplan)
+#   apply          Terraform apply + bootstrap (no saved plan)
+#   plan-apply     Terraform plan (tfplan) + terraform apply tfplan + bootstrap
+#   destroy        Terraform destroy only
+#   reset-piraeus  Uninstall Piraeus/LINSTOR from current cluster (best-effort)
+#   reset-all      reset-piraeus + terraform destroy + cleanup generated local files (does NOT delete terraform state by default)
+#   fix-linstor-db Fix LINSTOR DB migration errors (corrupted state from failed migrations)
+#   nuke-piraeus   Complete removal of Piraeus namespace and CRDs (use when fix-linstor-db doesn't work)
 #
 # Notes:
 # - This script reads terraform outputs:
@@ -76,14 +78,35 @@ KUBECONFIG_LENS_OUT="${KUBECONFIG_LENS_OUT:-$WORKDIR/kubeconfig.lens.yml}"  # sa
 TALOSCONFIG_OUT="${TALOSCONFIG_OUT:-$WORKDIR/talosconfig.yml}"
 INGRESS_CA_OUT="${INGRESS_CA_OUT:-$WORKDIR/kubernetes-ingress-ca-crt.pem}"
 
+# Logging
+LOG_FILE="${LOG_FILE:-$WORKDIR/do.log}"
+LOG_ENABLED="${LOG_ENABLED:-0}"  # Set LOG_ENABLED=1 to enable file logging
+
 # -----------------------------
 # Pretty logging
 # -----------------------------
-ts() { date +"%H:%M:%S"; }
-step() { echo; echo "### $* ###"; }
-info() { echo "INFO: $*"; }
-warn() { echo "WARN: $*" >&2; }
-die() { echo "ERROR: $*" >&2; exit 1; }
+ts() { date +"%Y-%m-%d %H:%M:%S"; }
+
+_log() {
+  local msg="$1"
+  echo "$msg"
+  if [[ "$LOG_ENABLED" == "1" ]]; then
+    echo "[$(ts)] $msg" >> "$LOG_FILE"
+  fi
+}
+
+_log_err() {
+  local msg="$1"
+  echo "$msg" >&2
+  if [[ "$LOG_ENABLED" == "1" ]]; then
+    echo "[$(ts)] $msg" >> "$LOG_FILE"
+  fi
+}
+
+step() { _log ""; _log "### $* ###"; }
+info() { _log "INFO: $*"; }
+warn() { _log_err "WARN: $*"; }
+die() { _log_err "ERROR: $*"; exit 1; }
 
 need() {
   command -v "$1" >/dev/null 2>&1 || die "Missing dependency: $1"
@@ -1093,6 +1116,101 @@ reset_linstor_internal_db() {
   fi
 }
 
+# Fix LINSTOR DB migration issues (corrupted state from failed migrations)
+reset_linstor_db_migration() {
+  step "reset LINSTOR DB migration state"
+  
+  info "Deleting LINSTOR backup secrets (migration state)..."
+  kubectl delete secrets -n piraeus-datastore -l piraeus.io/linstor-backup --ignore-not-found 2>/dev/null || true
+  
+  info "Deleting LINSTOR remote database CRDs..."
+  kubectl delete linstorremotedatabases.internal.linstor.linbit.com --all -n piraeus-datastore --ignore-not-found 2>/dev/null || true
+  
+  info "Restarting linstor-controller pod..."
+  kubectl delete pod -n piraeus-datastore -l app.kubernetes.io/component=linstor-controller --ignore-not-found 2>/dev/null || true
+  
+  info "Waiting for controller to restart..."
+  sleep 5
+  kubectl get pods -n piraeus-datastore -l app.kubernetes.io/component=linstor-controller -o wide || true
+}
+
+cmd_fix_linstor_db() {
+  need kubectl
+
+  if ! ensure_kubeconfig; then
+    die "No kubeconfig found (set KUBECONFIG or run ./do plan-apply/apply first)."
+  fi
+
+  step "fix LINSTOR DB migration issues"
+  info "This fixes 'Cannot perform Migration while a rollback has to be done' errors."
+  info "KUBECONFIG=$KUBECONFIG"
+  
+  reset_linstor_db_migration
+  
+  info ""
+  info "Controller should restart. Watch with:"
+  info "  kubectl get pods -n piraeus-datastore -l app.kubernetes.io/component=linstor-controller -w"
+  info ""
+  info "If still broken, run: ./do nuke-piraeus"
+}
+
+cmd_nuke_piraeus() {
+  need kubectl
+
+  if ! ensure_kubeconfig; then
+    die "No kubeconfig found (set KUBECONFIG or run ./do plan-apply/apply first)."
+  fi
+
+  step "NUKE piraeus/linstor (complete removal)"
+  warn "This DELETES the entire piraeus-datastore namespace and all CRDs!"
+  warn "All LINSTOR storage pools and data references will be lost."
+  info "KUBECONFIG=$KUBECONFIG"
+  
+  # Force delete namespace
+  info "Deleting piraeus-datastore namespace..."
+  kubectl delete namespace piraeus-datastore --grace-period=0 --force --ignore-not-found --timeout=10s 2>/dev/null || true
+  
+  # Wait a bit
+  sleep 3
+  
+  # Clear stuck namespace
+  strip_finalizers_ns_if_stuck piraeus-datastore
+  
+  # Delete StorageClass first (no finalizers usually)
+  kubectl delete storageclass "$STORAGECLASS_NAME" --ignore-not-found 2>/dev/null || true
+  
+  # Remove finalizers from all piraeus/linstor CRDs and delete them
+  info "Removing finalizers and deleting Piraeus/LINSTOR CRDs..."
+  local crd
+  for crd in $(kubectl get crd -o name 2>/dev/null | grep -E 'piraeus|linstor' || true); do
+    info "  Cleaning: $crd"
+    # Remove finalizers first
+    kubectl patch "$crd" -p '{"metadata":{"finalizers":[]}}' --type=merge 2>/dev/null || true
+    # Then delete with short timeout
+    kubectl delete "$crd" --timeout=10s 2>/dev/null || true
+  done
+  
+  # Double-check internal LINSTOR CRDs
+  info "Cleaning internal.linstor.linbit.com CRDs..."
+  for crd in $(kubectl get crd -o name 2>/dev/null | grep 'internal.linstor.linbit.com' || true); do
+    kubectl patch "$crd" -p '{"metadata":{"finalizers":[]}}' --type=merge 2>/dev/null || true
+    kubectl delete "$crd" --timeout=10s 2>/dev/null || true
+  done
+  
+  # Verify cleanup
+  local remaining
+  remaining=$(kubectl get crd -o name 2>/dev/null | grep -E 'piraeus|linstor' || true)
+  if [[ -n "$remaining" ]]; then
+    warn "Some CRDs still remain (may need manual cleanup):"
+    echo "$remaining"
+  else
+    info "All Piraeus/LINSTOR CRDs removed."
+  fi
+  
+  info ""
+  info "Piraeus nuked. Run './do apply' to reinstall."
+}
+
 load_next_piraeus_version() {
   # Load next version from fallback candidates
   if [[ "$PIRAEUS_VERSION_FALLBACK_ENABLED" != "1" ]]; then
@@ -1873,6 +1991,8 @@ main() {
     destroy)           cmd_destroy ;;
     reset-piraeus)     cmd_reset_piraeus ;;
     reset-all)         cmd_reset_all ;;
+    fix-linstor-db)    cmd_fix_linstor_db ;;
+    nuke-piraeus)      cmd_nuke_piraeus ;;
     deploy-traefik)    ensure_kubeconfig && deploy_traefik ;;
     deploy-harbor)     ensure_kubeconfig && deploy_harbor ;;
     deploy-monitoring) ensure_kubeconfig && deploy_monitoring ;;
