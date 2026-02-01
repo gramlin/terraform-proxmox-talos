@@ -602,10 +602,86 @@ terraform_plan() {
 TF_RESOURCES_FILE="$WORKDIR/.tf-resources.json"
 TALOS_STATUS_FILE="$WORKDIR/.talos-status.json"
 LINSTOR_STATUS_FILE="$WORKDIR/.linstor-status.json"
+PROXMOX_STATUS_FILE="$WORKDIR/.proxmox-status.json"
 
 # Initialize terraform resources tracking
 init_tf_resources() {
   echo '{"resources":[],"status":"idle","timestamp":"'$(date -Iseconds)'"}' > "$TF_RESOURCES_FILE"
+}
+
+# Initialize proxmox status tracking
+init_proxmox_status() {
+  echo '{"vms":[],"status":"idle","timestamp":"'$(date -Iseconds)'"}' > "$PROXMOX_STATUS_FILE"
+}
+
+# Query Proxmox API for VM status
+query_proxmox_vms() {
+  local endpoint="${PROXMOX_VE_ENDPOINT:-}"
+  local token="${PROXMOX_VE_API_TOKEN:-}"
+  local node="${TF_VAR_proxmox_pve_node_name:-pve}"
+  
+  [[ -z "$endpoint" || -z "$token" ]] && return 1
+  
+  # Parse token: user!tokenid=secret -> Authorization header
+  local auth_header="PVEAPIToken=${token}"
+  
+  # Get all VMs on the node
+  local result
+  result=$(curl -sk -H "Authorization: ${auth_header}" \
+    "${endpoint}/api2/json/nodes/${node}/qemu" 2>/dev/null) || return 1
+  
+  echo "$result"
+}
+
+# Update Proxmox VM status for dashboard
+update_proxmox_status() {
+  local endpoint="${PROXMOX_VE_ENDPOINT:-}"
+  local token="${PROXMOX_VE_API_TOKEN:-}"
+  local node="${TF_VAR_proxmox_pve_node_name:-pve}"
+  
+  [[ -z "$endpoint" || -z "$token" ]] && return 0
+  
+  local auth_header="PVEAPIToken=${token}"
+  
+  # Get VMs matching talos pattern
+  local vms_json
+  vms_json=$(curl -sk -H "Authorization: ${auth_header}" \
+    "${endpoint}/api2/json/nodes/${node}/qemu" 2>/dev/null) || return 0
+  
+  if command -v jq &>/dev/null && [[ -n "$vms_json" ]]; then
+    # Filter talos VMs and extract relevant info
+    echo "$vms_json" | jq --arg t "$(date -Iseconds)" '
+      {
+        timestamp: $t,
+        status: "running",
+        vms: [.data[] | select(.name | test("talos|ctrl|worker"; "i")) | {
+          vmid: .vmid,
+          name: .name,
+          status: .status,
+          cpu: (.cpu // 0 | . * 100 | floor),
+          mem: (if .maxmem > 0 then ((.mem // 0) / .maxmem * 100 | floor) else 0 end),
+          uptime: .uptime,
+          netin: .netin,
+          netout: .netout
+        }]
+      }
+    ' > "$PROXMOX_STATUS_FILE" 2>/dev/null || true
+  fi
+}
+
+# Background task to continuously update Proxmox status
+start_proxmox_monitor() {
+  (
+    while true; do
+      update_proxmox_status
+      sleep 5
+    done
+  ) &
+  PROXMOX_MONITOR_PID=$!
+}
+
+stop_proxmox_monitor() {
+  [[ -n "${PROXMOX_MONITOR_PID:-}" ]] && kill "$PROXMOX_MONITOR_PID" 2>/dev/null || true
 }
 
 # Initialize talos status tracking
@@ -2631,6 +2707,11 @@ cmd_plan() {
 cmd_apply() {
   show_config
   
+  # Start Proxmox VM monitor for dashboard
+  init_proxmox_status
+  start_proxmox_monitor
+  trap 'stop_proxmox_monitor' EXIT
+  
   if [[ "$RUN_TERRAFORM" == "1" ]]; then
     need terraform
     terraform_init
@@ -2644,6 +2725,11 @@ cmd_apply() {
 
 cmd_plan_apply() {
   show_config
+  
+  # Start Proxmox VM monitor for dashboard
+  init_proxmox_status
+  start_proxmox_monitor
+  trap 'stop_proxmox_monitor' EXIT
   
   need terraform
   terraform_init

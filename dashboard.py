@@ -1494,55 +1494,47 @@ class ClusterDashboard:
         resources = data.get("resources", [])
         status = data.get("status", "idle")
         
-        table = Table(title="Terraform", show_header=True, border_style="#444444", box=None, title_style="#000000", expand=True)
-        table.add_column("Resource", width=25, style="#000000")
-        table.add_column("Action", width=10)
-        table.add_column("Time", width=8, style="#666666")
+        table = Table(title="Terraform", show_header=False, border_style="#444444", box=None, title_style="#000000", expand=True)
+        table.add_column("Resource", ratio=3, style="#000000", no_wrap=True, overflow="ellipsis")
+        table.add_column("Action", ratio=1)
         
         if status == "idle" or not resources:
             table.add_row(
                 Text("Waiting for terraform...", style="#666666"),
-                Text("", style="#666666"),
                 Text("", style="#666666")
             )
             return table
         
-        # Show most recent resources (up to 8)
-        recent = sorted(resources, key=lambda r: r.get("updated", ""), reverse=True)[:8]
+        # Show most recent resources (up to 4)
+        recent = sorted(resources, key=lambda r: r.get("updated", ""), reverse=True)[:4]
         
         for res in recent:
-            name = res.get("name", "?")[:25]
+            name = res.get("name", "?")[:20]
             action = res.get("action", "?")
-            message = res.get("message", "")
             
             # Color based on action
             if action == "complete":
-                action_text = Text("[done]", style="#33FF33")
+                action_text = Text("OK", style="#33FF33")
             elif action == "creating":
                 spinner = SPINNER_FRAMES[self.frame % len(SPINNER_FRAMES)]
-                action_text = Text(f"{spinner} create", style="#FFAA33")
+                action_text = Text(f"{spinner}", style="#FFAA33")
             elif action == "modifying":
                 spinner = SPINNER_FRAMES[self.frame % len(SPINNER_FRAMES)]
-                action_text = Text(f"{spinner} modify", style="#0088FF")
+                action_text = Text(f"{spinner}", style="#0088FF")
             elif action == "destroying":
                 spinner = SPINNER_FRAMES[self.frame % len(SPINNER_FRAMES)]
-                action_text = Text(f"{spinner} delete", style="#FF6633")
+                action_text = Text(f"{spinner}", style="#FF6633")
             elif action == "failed":
-                action_text = Text("[FAIL]", style="#FF3333 bold")
+                action_text = Text("!!", style="#FF3333 bold")
             else:
-                action_text = Text(action[:10], style="#666666")
+                action_text = Text(".", style="#666666")
             
-            table.add_row(
-                Text(name, style="#000000"),
-                action_text,
-                Text(message, style="#666666")
-            )
+            table.add_row(Text(name, style="#000000"), action_text)
         
         # Show count if more
-        if len(resources) > 8:
+        if len(resources) > 4:
             table.add_row(
-                Text(f"... +{len(resources) - 8} more", style="#666666"),
-                Text("", style="#666666"),
+                Text(f"+{len(resources) - 4} more", style="#666666"),
                 Text("", style="#666666")
             )
         
@@ -1570,46 +1562,115 @@ class ClusterDashboard:
                 pass
         return {"operations": [], "status": "idle"}
 
-    def render_talos_status(self) -> Table:
-        """Render Talos operations status"""
-        data = self._load_talos_status()
-        operations = data.get("operations", [])
+    def _load_proxmox_status(self) -> dict:
+        """Load proxmox VM status from JSON file"""
+        proxmox_file = os.path.join(self.workdir, ".proxmox-status.json")
+        if os.path.exists(proxmox_file):
+            try:
+                with open(proxmox_file, "r") as f:
+                    return json.load(f)
+            except (json.JSONDecodeError, IOError):
+                pass
+        return {"vms": [], "status": "idle"}
+
+    def render_proxmox_status(self) -> Table:
+        """Render Proxmox VM status"""
+        data = self._load_proxmox_status()
+        vms = data.get("vms", [])
         
-        table = Table(title="Talos", show_header=True, border_style="#444444", box=None, title_style="#000000", expand=True)
-        table.add_column("Operation", width=15, style="#000000")
-        table.add_column("Status", width=10)
-        table.add_column("Info", width=12, style="#666666")
+        table = Table(title="Proxmox VMs", show_header=False, border_style="#444444", box=None, title_style="#000000", expand=True)
+        table.add_column("VM", ratio=2, style="#000000", no_wrap=True, overflow="ellipsis")
+        table.add_column("St", ratio=1)
+        table.add_column("C", justify="right")
+        table.add_column("M", justify="right")
         
-        if not operations:
+        if not vms:
             table.add_row(
                 Text("Waiting...", style="#666666"),
+                Text("", style="#666666"),
                 Text("", style="#666666"),
                 Text("", style="#666666")
             )
             return table
         
-        for op in operations[-6:]:  # Show last 6
-            name = op.get("name", "?")[:15]
+        for vm in sorted(vms, key=lambda v: v.get("name", "")):
+            name = vm.get("name", "?")[:18]
+            status = vm.get("status", "?")
+            cpu = vm.get("cpu", 0)
+            mem = vm.get("mem", 0)
+            uptime = vm.get("uptime", 0)
+            
+            # Status indicator with animation
+            if status == "running":
+                # Uptime check - recently started VMs get animated boot indicator
+                if uptime < 60:
+                    spinner = SPINNER_FRAMES[self.frame % len(SPINNER_FRAMES)]
+                    state_text = Text(f"{spinner} boot", style="#FFAA33")
+                else:
+                    # Pulse effect for healthy running VMs
+                    phase = (self.frame // 4) % 4
+                    if phase == 0:
+                        state_text = Text("* UP", style="#33FF33")
+                    else:
+                        state_text = Text("* UP", style="#22CC22")
+            elif status == "stopped":
+                state_text = Text("- DOWN", style="#FF6633")
+            elif status == "paused":
+                state_text = Text("| PAUSE", style="#FFAA33")
+            else:
+                state_text = Text(status[:8], style="#666666")
+            
+            # CPU color based on load
+            if cpu > 80:
+                cpu_text = Text(f"{cpu:3}%", style="#FF3333")
+            elif cpu > 50:
+                cpu_text = Text(f"{cpu:3}%", style="#FFAA33")
+            else:
+                cpu_text = Text(f"{cpu:3}%", style="#33FF33")
+            
+            # Memory color based on usage
+            if mem > 85:
+                mem_text = Text(f"{mem:3}%", style="#FF3333")
+            elif mem > 70:
+                mem_text = Text(f"{mem:3}%", style="#FFAA33")
+            else:
+                mem_text = Text(f"{mem:3}%", style="#33FF33")
+            
+            table.add_row(name, state_text, cpu_text, mem_text)
+        
+        return table
+
+    def render_talos_status(self) -> Table:
+        """Render Talos operations status"""
+        data = self._load_talos_status()
+        operations = data.get("operations", [])
+        
+        table = Table(title="Talos", show_header=False, border_style="#444444", box=None, title_style="#000000", expand=True)
+        table.add_column("Op", ratio=3, style="#000000", no_wrap=True, overflow="ellipsis")
+        table.add_column("St", ratio=1)
+        
+        if not operations:
+            table.add_row(
+                Text("Waiting...", style="#666666"),
+                Text("", style="#666666")
+            )
+            return table
+        
+        for op in operations[-4:]:  # Show last 4
+            name = op.get("name", "?")[:18]
             action = op.get("action", "?")
-            message = op.get("message", "")[:12]
-            node = op.get("node", "")
             
             if action == "complete":
-                action_text = Text("[done]", style="#33FF33")
+                action_text = Text("OK", style="#33FF33")
             elif action in ["checking", "bootstrapping", "configuring"]:
                 spinner = SPINNER_FRAMES[self.frame % len(SPINNER_FRAMES)]
-                action_text = Text(f"{spinner} {action[:6]}", style="#FFAA33")
+                action_text = Text(f"{spinner}", style="#FFAA33")
             elif action == "failed":
-                action_text = Text("[FAIL]", style="#FF3333 bold")
+                action_text = Text("!!", style="#FF3333 bold")
             else:
-                action_text = Text(action[:10], style="#666666")
+                action_text = Text(".", style="#666666")
             
-            info = message or node
-            table.add_row(
-                Text(name, style="#000000"),
-                action_text,
-                Text(info[:12], style="#666666")
-            )
+            table.add_row(Text(name, style="#000000"), action_text)
         
         return table
 
@@ -1618,39 +1679,32 @@ class ClusterDashboard:
         data = self._load_linstor_status()
         operations = data.get("operations", [])
         
-        table = Table(title="LINSTOR", show_header=True, border_style="#444444", box=None, title_style="#000000", expand=True)
-        table.add_column("Component", width=18, style="#000000")
-        table.add_column("Status", width=10)
-        table.add_column("Info", width=10, style="#666666")
+        table = Table(title="LINSTOR", show_header=False, border_style="#444444", box=None, title_style="#000000", expand=True)
+        table.add_column("Component", ratio=3, style="#000000", no_wrap=True, overflow="ellipsis")
+        table.add_column("St", ratio=1)
         
         if not operations:
             table.add_row(
                 Text("Waiting...", style="#666666"),
-                Text("", style="#666666"),
                 Text("", style="#666666")
             )
             return table
         
-        for op in operations[-6:]:  # Show last 6
-            name = op.get("name", "?")[:18]
+        for op in operations[-4:]:  # Show last 4
+            name = op.get("name", "?")[:20]
             action = op.get("action", "?")
-            message = op.get("message", "")[:10]
             
             if action == "complete":
-                action_text = Text("[done]", style="#33FF33")
+                action_text = Text("OK", style="#33FF33")
             elif action in ["installing", "creating", "waiting", "running"]:
                 spinner = SPINNER_FRAMES[self.frame % len(SPINNER_FRAMES)]
-                action_text = Text(f"{spinner} {action[:6]}", style="#FFAA33")
+                action_text = Text(f"{spinner}", style="#FFAA33")
             elif action == "failed":
-                action_text = Text("[FAIL]", style="#FF3333 bold")
+                action_text = Text("!!", style="#FF3333 bold")
             else:
-                action_text = Text(action[:10], style="#666666")
+                action_text = Text(".", style="#666666")
             
-            table.add_row(
-                Text(name, style="#000000"),
-                action_text,
-                Text(message, style="#666666")
-            )
+            table.add_row(Text(name, style="#000000"), action_text)
         
         return table
 
@@ -1868,9 +1922,15 @@ class ClusterDashboard:
                 )
         
         # Main area: steps on left, operations in middle, tests on right
-        layout["main"].split_row(Layout(name="left", ratio=2), Layout(name="middle", ratio=2), Layout(name="right", ratio=2))
+        layout["main"].split_row(Layout(name="left", ratio=2), Layout(name="middle", ratio=3), Layout(name="right", ratio=2))
         layout["left"].split_column(Layout(name="steps", ratio=4), Layout(name="details", ratio=1))
-        layout["middle"].split_column(Layout(name="terraform"), Layout(name="talos"), Layout(name="linstor"))
+        # Give each operation panel explicit minimum sizes
+        layout["middle"].split_column(
+            Layout(name="proxmox", minimum_size=6),
+            Layout(name="terraform", minimum_size=6),
+            Layout(name="talos", minimum_size=5),
+            Layout(name="linstor", minimum_size=5)
+        )
         layout["right"].split_column(Layout(name="tests", ratio=3), Layout(name="pvcs", ratio=2))
         
         # Header with fancy animation
@@ -1880,7 +1940,8 @@ class ClusterDashboard:
         layout["steps"].update(Panel(self.render_step_table(), title="Steps", border_style="#444444", style=BG_STYLE))
         layout["details"].update(Panel(self.render_checkpoint_details(), title="Active", border_style="#444444", style=BG_STYLE))
         
-        # Operation panels: Terraform, Talos, LINSTOR
+        # Operation panels: Proxmox, Terraform, Talos, LINSTOR
+        layout["proxmox"].update(Panel(self.render_proxmox_status(), border_style="#444444", style=BG_STYLE))
         layout["terraform"].update(Panel(self.render_tf_resources(), border_style="#444444", style=BG_STYLE))
         layout["talos"].update(Panel(self.render_talos_status(), border_style="#444444", style=BG_STYLE))
         layout["linstor"].update(Panel(self.render_linstor_status(), border_style="#444444", style=BG_STYLE))
