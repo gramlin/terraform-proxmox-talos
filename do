@@ -1504,8 +1504,9 @@ persistence:
       storageClass: "$STORAGECLASS_NAME"
       size: 5Gi
     jobservice:
-      storageClass: "$STORAGECLASS_NAME"
-      size: 1Gi
+      jobLog:
+        storageClass: "$STORAGECLASS_NAME"
+        size: 1Gi
 harborAdminPassword: "$HARBOR_ADMIN_PASSWORD"
 trivy:
   enabled: true
