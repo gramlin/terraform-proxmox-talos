@@ -1382,6 +1382,64 @@ export_ingress_ca() {
 }
 
 # -----------------------------
+# Clean - remove all components for fresh start
+# -----------------------------
+cmd_clean() {
+  step "clean - removing all deployed components"
+  
+  if ! ensure_kubeconfig; then
+    warn "No kubeconfig found, skipping kubernetes cleanup"
+  else
+    info "Removing Helm releases..."
+    helm uninstall harbor -n harbor 2>/dev/null || true
+    helm uninstall gitea -n gitea 2>/dev/null || true
+    helm uninstall monitoring -n monitoring 2>/dev/null || true
+    helm uninstall traefik -n traefik 2>/dev/null || true
+    helm uninstall piraeus-operator -n piraeus-datastore 2>/dev/null || true
+
+    info "Removing PVCs..."
+    for ns in harbor gitea monitoring; do
+      kubectl delete pvc --all -n "$ns" --force --grace-period=0 2>/dev/null || true
+    done
+
+    info "Cleaning LINSTOR resources..."
+    # Delete resource definitions (volumes)
+    local linstor_pod
+    linstor_pod=$(kubectl -n piraeus-datastore get pod -l app.kubernetes.io/component=linstor-controller -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+    if [[ -n "$linstor_pod" ]]; then
+      kubectl -n piraeus-datastore exec "$linstor_pod" -- linstor resource-definition list 2>/dev/null | \
+        grep -oP 'pvc-[a-f0-9-]+' | sort -u | \
+        xargs -I{} kubectl -n piraeus-datastore exec "$linstor_pod" -- linstor resource-definition delete {} 2>/dev/null || true
+    fi
+
+    info "Removing LINSTOR CRDs..."
+    kubectl delete linstorcluster --all --ignore-not-found 2>/dev/null || true
+    kubectl delete linstorsatellite --all --ignore-not-found 2>/dev/null || true
+    kubectl delete linstorsatelliteconfiguration --all --ignore-not-found 2>/dev/null || true
+
+    info "Removing StorageClass..."
+    kubectl delete storageclass "$STORAGECLASS_NAME" --ignore-not-found 2>/dev/null || true
+
+    info "Removing namespaces..."
+    for ns in harbor gitea monitoring traefik piraeus-datastore linstor-smoke cert-manager trust-manager; do
+      kubectl delete ns "$ns" --ignore-not-found --timeout=30s 2>/dev/null || true
+      strip_finalizers_ns_if_stuck "$ns"
+    done
+
+    info "Removing Piraeus operator..."
+    kubectl delete -k "https://github.com/piraeusdatastore/piraeus-operator/config/default?ref=v${PIRAEUS_OPERATOR_VERSION}" 2>/dev/null || true
+
+    # Final cleanup of stuck resources
+    for crd in $(kubectl get crd -o name 2>/dev/null | grep -E 'piraeus|linstor' || true); do
+      kubectl patch "$crd" -p '{"metadata":{"finalizers":[]}}' --type=merge 2>/dev/null || true
+      kubectl delete "$crd" --timeout=10s 2>/dev/null || true
+    done
+  fi
+
+  info "✓ Clean complete - ready for fresh ./do apply"
+}
+
+# -----------------------------
 # Reset helpers
 # -----------------------------
 strip_finalizers_ns_if_stuck() {
@@ -2090,6 +2148,7 @@ main() {
     apply)             cmd_apply ;;
     plan-apply)        cmd_plan_apply ;;
     destroy)           cmd_destroy ;;
+    clean)             cmd_clean ;;
     reset-piraeus)     cmd_reset_piraeus ;;
     reset-all)         cmd_reset_all ;;
     fix-linstor-db)    cmd_fix_linstor_db ;;
