@@ -185,7 +185,37 @@ class ClusterDashboard:
         self.frame = 0  # Animation frame counter
         self.start_time = time.time()  # Track uptime
         self.completion_frame = None  # When did we complete?
+        self.preflight_status = {}  # Preflight check status
         self._init_steps()
+        self._init_preflight()
+
+    def _init_preflight(self):
+        """Initialize preflight checks"""
+        tf_files = len([f for f in os.listdir(self.workdir) if f.endswith('.tf')]) if os.path.isdir(self.workdir) else 0
+        
+        # Check tracking files exist and are fresh (updated in last 30s)
+        tf_tracking = os.path.join(self.workdir, ".tf-resources.json")
+        talos_tracking = os.path.join(self.workdir, ".talos-status.json")
+        proxmox_tracking = os.path.join(self.workdir, ".proxmox-status.json")
+        
+        def is_fresh(path, max_age=30):
+            if os.path.isfile(path):
+                return time.time() - os.path.getmtime(path) < max_age
+            return False
+        
+        self.preflight_status = {
+            "workdir": os.path.isdir(self.workdir),
+            "terraform": os.path.isdir(os.path.join(self.workdir, ".terraform")) or tf_files > 0,
+            "tf_files": tf_files,
+            "kubeconfig": os.path.isfile(self.kubeconfig) if self.kubeconfig else False,
+            "talosconfig": os.path.isfile(self.talosconfig),
+            "do_script": os.path.isfile(os.path.join(self.workdir, "do")),
+            "secrets": os.path.isfile(os.path.join(self.workdir, "secrets-proxmox.tf")),
+            # Tracking files status
+            "tf_tracking": is_fresh(tf_tracking),
+            "talos_tracking": is_fresh(talos_tracking),
+            "proxmox_tracking": is_fresh(proxmox_tracking),
+        }
 
     def _find_kubeconfig(self) -> str:
         candidates = [
@@ -1477,14 +1507,74 @@ class ClusterDashboard:
         
         return text
 
+    def render_preflight(self) -> Table:
+        """Render preflight status panel"""
+        table = Table(title="Preflight", show_header=False, border_style="#444444", box=None, title_style="#000000", expand=True)
+        table.add_column("Check", ratio=2, style="#000000")
+        table.add_column("Status", ratio=1)
+        
+        # Basic checks
+        checks = [
+            ("Workdir", self.preflight_status.get("workdir", False)),
+            ("TF Files", self.preflight_status.get("tf_files", 0) > 0),
+            ("Secrets", self.preflight_status.get("secrets", False)),
+            ("Do Script", self.preflight_status.get("do_script", False)),
+        ]
+        
+        for name, ok in checks:
+            if ok:
+                status = Text("OK", style="bold #33FF33")
+            else:
+                # Animate pending checks
+                spinner = SPINNER_FRAMES[self.frame % len(SPINNER_FRAMES)]
+                status = Text(f"{spinner}", style="bold #FFAA33")
+            table.add_row(Text(name, style="#000000"), status)
+        
+        # Divider
+        table.add_row(Text("─ Config ─", style="#666666"), Text("", style="#666666"))
+        
+        # Config files (become green when generated)
+        config_checks = [
+            ("Kubeconfig", self.preflight_status.get("kubeconfig", False)),
+            ("Talosconfig", self.preflight_status.get("talosconfig", False)),
+        ]
+        for name, ok in config_checks:
+            if ok:
+                status = Text("✓", style="bold #33FF33")
+            else:
+                status = Text("○", style="#666666")
+            table.add_row(Text(name, style="#000000"), status)
+        
+        # Tracking status (shows activity from do script)
+        table.add_row(Text("─ Activity ─", style="#666666"), Text("", style="#666666"))
+        
+        tracking_checks = [
+            ("TF Track", self.preflight_status.get("tf_tracking", False)),
+            ("Talos Track", self.preflight_status.get("talos_tracking", False)),
+            ("Proxmox Track", self.preflight_status.get("proxmox_tracking", False)),
+        ]
+        for name, ok in tracking_checks:
+            if ok:
+                # Active tracking - blinking indicator
+                blink = PULSE_FRAMES[self.frame % len(PULSE_FRAMES)]
+                status = Text(blink, style="bold #33FF33")
+            else:
+                status = Text("○", style="#666666")
+            table.add_row(Text(name, style="#000000"), status)
+        
+        return table
+
     def _load_tf_resources(self) -> dict:
         """Load terraform resources from JSON file"""
         tf_file = os.path.join(self.workdir, ".tf-resources.json")
         if os.path.exists(tf_file):
             try:
-                with open(tf_file, "r") as f:
-                    return json.load(f)
-            except (json.JSONDecodeError, IOError):
+                mtime = os.path.getmtime(tf_file)
+                # Only read if file was modified in last 5 minutes
+                if time.time() - mtime < 300:
+                    with open(tf_file, "r") as f:
+                        return json.load(f)
+            except (json.JSONDecodeError, IOError, OSError):
                 pass
         return {"resources": [], "status": "idle"}
 
@@ -1942,6 +2032,17 @@ class ClusterDashboard:
         
         # Build middle panels list (only show active/incomplete)
         middle_panels = []
+        
+        # Check if there's any operation panel activity
+        has_operation_panels = proxmox_has_vms or tf_active or talos_active or linstor_active \
+            or (not tf_complete and tf_data.get("resources")) \
+            or (not talos_complete and talos_data.get("operations")) \
+            or (not linstor_complete and linstor_data.get("operations"))
+        
+        # Always show preflight when nothing else is running
+        if not has_operation_panels:
+            middle_panels.append(("preflight", self.render_preflight()))
+        
         if proxmox_has_vms:
             middle_panels.append(("proxmox", self.render_proxmox_status()))
         if tf_active or (not tf_complete and tf_data.get("resources")):
@@ -2017,6 +2118,9 @@ class ClusterDashboard:
         return layout
 
     def update_all_statuses(self):
+        # Refresh preflight checks
+        self._init_preflight()
+        
         for step in self.steps:
             if step.check_fn:
                 try:

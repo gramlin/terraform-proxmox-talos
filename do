@@ -599,14 +599,14 @@ terraform_plan() {
 }
 
 # Terraform resource status file for dashboard
-TF_RESOURCES_FILE="${WORKDIR}/.tf-resources.json"
-TALOS_STATUS_FILE="${WORKDIR}/.talos-status.json"
-LINSTOR_STATUS_FILE="${WORKDIR}/.linstor-status.json"
-PROXMOX_STATUS_FILE="${WORKDIR}/.proxmox-status.json"
+export TF_RESOURCES_FILE="${WORKDIR}/.tf-resources.json"
+export TALOS_STATUS_FILE="${WORKDIR}/.talos-status.json"
+export LINSTOR_STATUS_FILE="${WORKDIR}/.linstor-status.json"
+export PROXMOX_STATUS_FILE="${WORKDIR}/.proxmox-status.json"
 
 # Initialize terraform resources tracking
 init_tf_resources() {
-  TF_RESOURCES_FILE="${WORKDIR}/.tf-resources.json"
+  export TF_RESOURCES_FILE="${WORKDIR}/.tf-resources.json"
   echo '{"resources":[],"status":"running","timestamp":"'$(date -Iseconds)'"}' > "$TF_RESOURCES_FILE"
   info "Tracking terraform resources to: $TF_RESOURCES_FILE"
 }
@@ -775,11 +775,17 @@ update_tf_resource() {
 # Parse terraform output and track resources
 tf_abbrev_and_track() {
   local line name action elapsed
+  # Debug: log to temp file to verify function is called
+  echo "[$(date -Iseconds)] tf_abbrev_and_track started, TF_RESOURCES_FILE=${TF_RESOURCES_FILE:-UNSET}" >> /tmp/tf_track_debug.log
   while IFS= read -r line; do
+    # Debug: log each line to help diagnose
+    echo "[$(date -Iseconds)] LINE: $line" >> /tmp/tf_track_debug.log
+    
     # Match: "resource_name: Creating..." or "resource_name[N]: Creating..."
     if [[ "$line" =~ ^([^:]+):\ (Creating|Modifying|Destroying|Refreshing)\.\.\. ]]; then
       name="${BASH_REMATCH[1]}"
       action="${BASH_REMATCH[2],,}"
+      echo "[$(date -Iseconds)] MATCHED: name=$name action=$action" >> /tmp/tf_track_debug.log
       update_tf_resource "$name" "$action" ""
     # Match: "resource_name: Creation complete after Xs"
     elif [[ "$line" =~ ^([^:]+):\ (Creation|Modifications|Destruction)\ complete ]]; then
