@@ -1662,6 +1662,16 @@ deploy_gitea() {
   
   kubectl create namespace "$ns" --dry-run=client -o yaml | kubectl apply -f -
 
+  # Clean up orphaned secrets that block helm install
+  for secret in gitea-inline-config gitea-init gitea; do
+    if kubectl get secret "$secret" -n "$ns" &>/dev/null; then
+      if ! kubectl get secret "$secret" -n "$ns" -o jsonpath='{.metadata.annotations.meta\.helm\.sh/release-name}' 2>/dev/null | grep -q "gitea"; then
+        warn "Removing orphaned secret: $secret"
+        kubectl delete secret "$secret" -n "$ns" --ignore-not-found
+      fi
+    fi
+  done
+
   helm repo add gitea-charts https://dl.gitea.com/charts/ 2>/dev/null || true
   helm repo update gitea-charts
 
