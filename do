@@ -1672,6 +1672,20 @@ deploy_gitea() {
     fi
   done
 
+  # Adopt orphaned resources by adding Helm annotations/labels
+  local release_name="gitea"
+  for resource in "svc/gitea-http" "svc/gitea-ssh" "deploy/gitea" "pvc/gitea" "sts/gitea"; do
+    if kubectl get "$resource" -n "$ns" &>/dev/null; then
+      local has_release
+      has_release=$(kubectl get "$resource" -n "$ns" -o jsonpath='{.metadata.annotations.meta\.helm\.sh/release-name}' 2>/dev/null || echo "")
+      if [[ "$has_release" != "$release_name" ]]; then
+        info "Adopting orphaned resource: $resource"
+        kubectl annotate "$resource" -n "$ns" meta.helm.sh/release-name="$release_name" meta.helm.sh/release-namespace="$ns" --overwrite
+        kubectl label "$resource" -n "$ns" app.kubernetes.io/managed-by=Helm --overwrite
+      fi
+    fi
+  done
+
   helm repo add gitea-charts https://dl.gitea.com/charts/ 2>/dev/null || true
   helm repo update gitea-charts
 
