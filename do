@@ -643,18 +643,18 @@ update_proxmox_status() {
   
   local auth_header="PVEAPIToken=${token}"
   
-  # Get VMs matching talos pattern
+  # Get VMs matching cure/talos/ctrl/worker pattern
   local vms_json
   vms_json=$(curl -sk -H "Authorization: ${auth_header}" \
     "${endpoint}/api2/json/nodes/${node}/qemu" 2>/dev/null) || return 0
   
   if command -v jq &>/dev/null && [[ -n "$vms_json" ]]; then
-    # Filter talos VMs and extract relevant info
+    # Filter VMs by name pattern (cure-, talos, ctrl, worker, cp, wk)
     echo "$vms_json" | jq --arg t "$(date -Iseconds)" '
       {
         timestamp: $t,
         status: "running",
-        vms: [.data[] | select(.name | test("talos|ctrl|worker"; "i")) | {
+        vms: [.data[] | select(.name | test("cure|talos|ctrl|worker|cp[0-9]|wk[0-9]"; "i")) | {
           vmid: .vmid,
           name: .name,
           status: .status,
@@ -765,15 +765,15 @@ update_tf_resource() {
 tf_abbrev_and_track() {
   local line action name
   while IFS= read -r line; do
-    # Parse terraform resource lines
-    if [[ "$line" =~ ^([a-zA-Z0-9_.-]+(\[[0-9]+\])?):\ (Creating|Modifying|Destroying|Refreshing)\.\.\.$ ]]; then
+    # Parse terraform resource lines (full resource names like proxmox_virtual_environment_vm.worker[0])
+    if [[ "$line" =~ ^([a-zA-Z0-9_.]+(\[[0-9]+\])?):\ (Creating|Modifying|Destroying|Refreshing)\.\.\.$ ]]; then
       name="${BASH_REMATCH[1]}"
       action="${BASH_REMATCH[3],,}"  # lowercase
-      update_tf_resource "$name" "$action" ""
-    elif [[ "$line" =~ ^([a-zA-Z0-9_.-]+(\[[0-9]+\])?):\ (Creation|Modifications|Destruction)\ complete ]]; then
+      update_tf_resource "$name" "${action}ing" ""
+    elif [[ "$line" =~ ^([a-zA-Z0-9_.]+(\[[0-9]+\])?):\ (Creation|Modifications|Destruction)\ complete ]]; then
       name="${BASH_REMATCH[1]}"
       update_tf_resource "$name" "complete" ""
-    elif [[ "$line" =~ ^([a-zA-Z0-9_.-]+(\[[0-9]+\])?):\ Still\ (creating|modifying|destroying)\.\.\.\ \[([0-9]+[sm])\ elapsed\] ]]; then
+    elif [[ "$line" =~ ^([a-zA-Z0-9_.]+(\[[0-9]+\])?):\ Still\ (creating|modifying|destroying)\.\.\.\ \[([0-9]+[hms0-9]+)\ elapsed\] ]]; then
       name="${BASH_REMATCH[1]}"
       action="${BASH_REMATCH[3]}"
       elapsed="${BASH_REMATCH[4]}"
