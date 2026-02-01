@@ -48,12 +48,6 @@ BG_COLOR = "#D9D7B6"
 BG_STYLE = Style(bgcolor=BG_COLOR)
 TEXT_COLOR = "#000000"
 
-# ╔══════════════════════════════════════════════════════════════════╗
-# ║  ACHTUNG! ALLES LOOKENSPEEPERS!                                  ║
-# ║  DAS BLINKENLICHTEN IST ACTIVE!                                  ║
-# ║  KEEPENHANSEN DAS COTTONPICKERS MITTS IN DAS POCKETS!           ║
-# ╚══════════════════════════════════════════════════════════════════╝
-
 # Spinner frames
 SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
 BLINK_FRAMES = ["◐", "◓", "◑", "◒"]
@@ -178,9 +172,10 @@ class Step:
 
 
 class ClusterDashboard:
-    def __init__(self, workdir: str = "."):
+    def __init__(self, workdir: str = ".", blinkenlicht: bool = False):
         self.console = Console()
         self.workdir = workdir
+        self.blinkenlicht = blinkenlicht
         self.kubeconfig = self._find_kubeconfig()
         self.talosconfig = os.path.join(workdir, "talosconfig.yml")
         self.test_results_file = os.path.join(workdir, ".test-results.json")
@@ -1240,7 +1235,7 @@ class ClusterDashboard:
                 color = colors[(self.frame + i) % len(colors)]
                 text.append(char, style=f"bold {color}")
         else:
-            title = "  ACHTUNG! DAS BLINKENLICHTEN!  "
+            title = "  SYSTEM STATUS MONITOR  "
             for i, char in enumerate(title):
                 phase = (self.frame + i * 2) % 20
                 if phase < 10:
@@ -1270,89 +1265,58 @@ class ClusterDashboard:
         
         text.append("╠═══════════════════════════════════════════╣\n", style="#444444")
         
-        # System status LEDs row 1
-        text.append("║ ", style="#444444")
-        text.append("SYS ", style="#000000 dim")
-        
-        # Animated system LEDs based on step status
-        led_states = []
-        for i, step in enumerate(self.steps[:8]):
-            if step.status == Status.SUCCESS:
-                led_states.append(("#33FF33", True))
-            elif step.status == Status.WAITING:
-                # Blink!
-                on = (self.frame + i) % 4 < 2
-                led_states.append(("#FFAA33" if on else LED_DIM, on))
-            elif step.status == Status.FAILED:
-                on = self.frame % 2 == 0
-                led_states.append(("#FF3333" if on else "#880000", True))
-            else:
-                led_states.append((LED_DIM, False))
-        
-        for color, _ in led_states:
-            text.append("●", style=color)
-            text.append(" ", style="#444444")
-        
-        text.append("  ║\n", style="#444444")
-        
-        # Network activity row
-        text.append("║ ", style="#444444")
-        text.append("NET ", style="#000000 dim")
-        
-        # Network activity animation
-        net_active = any(s.status == Status.WAITING for s in self.steps)
-        for i in range(8):
-            if net_active:
-                phase = (self.frame + i * 2) % 16
-                if phase < 8:
-                    intensity = phase / 8
+        # Helper to render LED row
+        def render_led_row(label: str, steps_slice: list, width: int = 8):
+            text.append("║ ", style="#444444")
+            text.append(f"{label:4} ", style="#000000 dim")
+            
+            for i in range(width):
+                if i < len(steps_slice):
+                    step = steps_slice[i]
+                    if step.status == Status.SUCCESS:
+                        text.append("●", style="#33FF33")
+                    elif step.status == Status.WAITING:
+                        on = (self.frame + i) % 4 < 2
+                        text.append("●" if on else "○", style="#FFAA33" if on else LED_DIM)
+                    elif step.status == Status.FAILED:
+                        on = self.frame % 2 == 0
+                        text.append("●" if on else "○", style="#FF3333" if on else "#880000")
+                    else:
+                        text.append("○", style=LED_DIM)
                 else:
-                    intensity = (16 - phase) / 8
-                color = f"#{int(51 + 204*intensity):02x}{int(102 + 153*intensity):02x}FF"
-                text.append("●", style=color)
-            else:
-                text.append("○", style=LED_DIM)
-            text.append(" ", style="#444444")
-        text.append("  ║\n", style="#444444")
+                    text.append("·", style=LED_DIM)
+                text.append(" ", style="#444444")
+            
+            # Show count
+            done = sum(1 for s in steps_slice if s.status == Status.SUCCESS)
+            text.append(f" {done}/{len(steps_slice)}", style="#666666")
+            text.append(" ║\n", style="#444444")
         
-        # Storage activity row
+        # Group steps by category
+        infra_steps = [s for s in self.steps if s.name in ["tfplan", "tfapply", "vms"]]
+        talos_steps = [s for s in self.steps if s.name in ["talos_cfg", "talos_boot", "nodes"]]
+        net_steps = [s for s in self.steps if s.name in ["cilium"]]
+        stor_steps = [s for s in self.steps if s.name in ["piraeus", "linstor", "satellites", "storage", "sc"]]
+        apps_steps = [s for s in self.steps if s.name in ["traefik", "certmgr", "monitoring", "harbor", "gitea", "ingress"]]
+        
+        # INFRA: TF Plan, TF Apply, VMs
+        render_led_row("INFR", infra_steps, 3)
+        
+        # TALOS: Talos Cfg, Talos Boot, Nodes
+        render_led_row("TALO", talos_steps, 3)
+        
+        # NET: Cilium
+        render_led_row("NET ", net_steps, 1)
+        
+        # STOR: Piraeus, LINSTOR, Satellites, Storage, StorClass
+        render_led_row("STOR", stor_steps, 5)
+        
+        # APPS: Traefik, CertMgr, Monitor, Harbor, Gitea, Ingress
+        render_led_row("APPS", apps_steps, 6)
+        
+        # Progress bar
         text.append("║ ", style="#444444")
-        text.append("I/O ", style="#000000 dim")
-        
-        storage_steps = [s for s in self.steps if "stor" in s.name.lower() or "linstor" in s.name.lower() or "pvc" in s.name.lower()]
-        storage_active = any(s.status == Status.WAITING for s in storage_steps)
-        
-        for i in range(8):
-            if storage_active:
-                on = (self.frame + i * 3) % 6 < 3
-                text.append("●" if on else "○", style="#FF6633" if on else LED_DIM)
-            else:
-                has_storage = i < len([s for s in self.steps if s.name in ["storage", "satellites", "linstor", "sc"] and s.status == Status.SUCCESS])
-                text.append("●" if has_storage else "○", style="#33FF33" if has_storage else LED_DIM)
-            text.append(" ", style="#444444")
-        text.append("  ║\n", style="#444444")
-        
-        # CPU activity (fake but fun)
-        text.append("║ ", style="#444444")
-        text.append("CPU ", style="#000000 dim")
-        
-        for i in range(8):
-            # Random-ish blinking based on frame
-            val = ((self.frame * 7 + i * 13) % 100)
-            if val < 30:
-                text.append("●", style="#33FF33")
-            elif val < 60:
-                text.append("●", style="#FFFF33")
-            elif val < 80:
-                text.append("●", style="#FF6633")
-            else:
-                text.append("○", style=LED_DIM)
-            text.append(" ", style="#444444")
-        text.append("  ║\n", style="#444444")
-        
-        # Memory bar
-        text.append("║ ", style="#444444")
-        text.append("MEM ", style="#000000 dim")
+        text.append("PROG ", style="#000000 dim")
         
         completed = sum(1 for s in self.steps if s.status == Status.SUCCESS)
         total = len(self.steps)
@@ -1366,7 +1330,10 @@ class ClusterDashboard:
             else:
                 text.append("░", style=LED_DIM)
             text.append(" ", style="#444444")
-        text.append("  ║\n", style="#444444")
+        
+        pct = int((completed / total) * 100) if total > 0 else 0
+        text.append(f" {pct:3d}%", style="#000000 bold")
+        text.append(" ║\n", style="#444444")
         
         text.append("╠═══════════════════════════════════════════╣\n", style="#444444")
         
@@ -1613,7 +1580,7 @@ class ClusterDashboard:
         return bar
 
     def render_header_fancy(self) -> Text:
-        """Render an animated header with MAXIMUM BLINKENLIGHTS"""
+        """Render an animated header"""
         text = Text()
         
         # Check if all complete
@@ -1621,18 +1588,17 @@ class ClusterDashboard:
         if all_done and self.completion_frame is None:
             self.completion_frame = self.frame
         
-        # Celebration mode!
+        # Status icon
         if all_done:
-            celebration_icons = ["🎉", "🎊", "✨", "🌟", "🏆", "🚀", "💫", "⭐"]
-            icon = celebration_icons[self.frame % len(celebration_icons)]
-            text.append(f" {icon} ", style="bold")
+            text.append(" ✓ ", style="bold #33FF33")
+        elif any(s.status == Status.WAITING for s in self.steps):
+            spinner = SPINNER_FRAMES[self.frame % len(SPINNER_FRAMES)]
+            text.append(f" {spinner} ", style="bold #FFAA33")
         else:
-            # Animated rocket
-            rocket = ROCKET_FRAMES[self.frame % len(ROCKET_FRAMES)]
-            text.append(f" {rocket} ", style="bold")
+            text.append(" ○ ", style="bold #666666")
         
         # Title with rainbow animation when complete
-        title = "TALOS CLUSTER DASHBOARD"
+        title = "CURE BACKBONE DEPLOY"
         if all_done:
             # Rainbow celebration!
             colors = ["#FF0000", "#FF7F00", "#FFFF00", "#00FF00", "#0000FF", "#4B0082", "#9400D3"]
@@ -1664,9 +1630,7 @@ class ClusterDashboard:
         
         # Activity indicator
         if all_done:
-            # Celebration sparkles
-            sparkles = ["✨", "💫", "⭐", "🌟"]
-            text.append(f"  {sparkles[self.frame % len(sparkles)]}", style="#FFD700")
+            text.append("  ✓", style="#33FF33")
         elif any(s.status == Status.WAITING for s in self.steps):
             activity = DOTS_FRAMES[self.frame % len(DOTS_FRAMES)]
             text.append(f"  {activity}", style="#FFAA33")
@@ -1682,21 +1646,36 @@ class ClusterDashboard:
         
         if all_done:
             # CELEBRATION MODE! 🎉
-            layout.split_column(
-                Layout(name="header", size=3),
-                Layout(name="celebration", size=5),
-                Layout(name="main"),
-                Layout(name="blinken", size=12),
-                Layout(name="footer", size=3)
-            )
+            if self.blinkenlicht:
+                layout.split_column(
+                    Layout(name="header", size=3),
+                    Layout(name="celebration", size=5),
+                    Layout(name="main"),
+                    Layout(name="blinken", size=12),
+                    Layout(name="footer", size=3)
+                )
+            else:
+                layout.split_column(
+                    Layout(name="header", size=3),
+                    Layout(name="celebration", size=5),
+                    Layout(name="main"),
+                    Layout(name="footer", size=3)
+                )
             layout["celebration"].update(Panel(self.render_celebration(), border_style="#FFD700", style=BG_STYLE, title="🏆 VICTORY", title_align="center"))
         else:
-            layout.split_column(
-                Layout(name="header", size=3),
-                Layout(name="main"),
-                Layout(name="blinken", size=12),
-                Layout(name="footer", size=3)
-            )
+            if self.blinkenlicht:
+                layout.split_column(
+                    Layout(name="header", size=3),
+                    Layout(name="main"),
+                    Layout(name="blinken", size=12),
+                    Layout(name="footer", size=3)
+                )
+            else:
+                layout.split_column(
+                    Layout(name="header", size=3),
+                    Layout(name="main"),
+                    Layout(name="footer", size=3)
+                )
         
         # Main area: steps on left, tests + pvcs on right
         layout["main"].split_row(Layout(name="left", ratio=2), Layout(name="right", ratio=3))
@@ -1714,8 +1693,9 @@ class ClusterDashboard:
         layout["tests"].update(Panel(self.render_test_cards(), border_style="#444444", style=BG_STYLE))
         layout["pvcs"].update(Panel(self.render_pvc_table(), border_style="#444444", style=BG_STYLE))
         
-        # BLINKENLIGHTS!
-        layout["blinken"].update(Panel(self.render_blinkenlights(), border_style="#444444", style=BG_STYLE))
+        # BLINKENLIGHTS! (only if enabled)
+        if self.blinkenlicht:
+            layout["blinken"].update(Panel(self.render_blinkenlights(), border_style="#444444", style=BG_STYLE))
         
         # Footer legend
         legend = Text()
@@ -1779,12 +1759,13 @@ class ClusterDashboard:
 
 def main():
     import argparse
-    parser = argparse.ArgumentParser(description="Talos Cluster Dashboard")
+    parser = argparse.ArgumentParser(description="Cure Backbone Deploy Dashboard")
     parser.add_argument("--workdir", "-w", default=".", help="Working directory")
     parser.add_argument("--once", "-1", action="store_true", help="Run once")
     parser.add_argument("--refresh", "-r", type=float, default=2.0, help="Refresh rate")
+    parser.add_argument("--blinkenlicht", "-b", action="store_true", help="Enable blinkenlicht panel")
     args = parser.parse_args()
-    dashboard = ClusterDashboard(workdir=args.workdir)
+    dashboard = ClusterDashboard(workdir=args.workdir, blinkenlicht=args.blinkenlicht)
     if args.once:
         dashboard.run_once()
     else:
