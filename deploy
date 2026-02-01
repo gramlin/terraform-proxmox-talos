@@ -24,8 +24,9 @@ command -v python3 >/dev/null || die "python3 not found"
 [[ -f "./dashboard.py" ]] || die "./dashboard.py not found"
 
 # Setup venv if needed
-if [[ ! -d ".venv" ]]; then
+if [[ ! -f ".venv/bin/python" ]]; then
     info "Creating Python venv..."
+    rm -rf .venv 2>/dev/null || true
     python3 -m venv .venv
 fi
 
