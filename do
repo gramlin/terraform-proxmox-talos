@@ -36,8 +36,8 @@ load_config() {
   INSTALL_PIRAEUS="true"
   INGRESS_CONTROLLER="traefik"
   INSTALL_HARBOR="true"
-  INSTALL_MONITORING="false"
-  INSTALL_GITEA="false"
+  INSTALL_MONITORING="true"
+  INSTALL_GITEA="true"
   INGRESS_DOMAIN="cure.dev"
   LB_IP_START=""
   LB_IP_END=""
@@ -280,6 +280,37 @@ progress() { printf "\r\033[K  → %s" "$*"; }
 progress_done() { printf "\r\033[K  ✓ %s\n" "$*"; }
 progress_fail() { printf "\r\033[K  ✗ %s\n" "$*"; }
 
+# Fix stuck PVC with mount failures (LINSTOR CSI bug workaround)
+fix_stuck_pvc_mount() {
+  local ns="$1"
+  local pvc_name="$2"
+  
+  # Check if any pod has mount failure for this PVC
+  local events=$(kubectl get events -n "$ns" --field-selector reason=FailedMount 2>/dev/null | grep "$pvc_name" || true)
+  
+  if echo "$events" | grep -qE "Bad magic number|superblock.*corrupt|failed to run fsck"; then
+    warn "Detected LINSTOR format bug for PVC $pvc_name - recreating..."
+    
+    # Get the pod using this PVC
+    local pod_name=$(kubectl get pods -n "$ns" -o json 2>/dev/null | \
+      jq -r ".items[] | select(.spec.volumes[]?.persistentVolumeClaim?.claimName == \"$pvc_name\") | .metadata.name" | head -1)
+    
+    # Delete PVC (force remove finalizers if stuck)
+    kubectl patch pvc "$pvc_name" -n "$ns" -p '{"metadata":{"finalizers":null}}' --type=merge 2>/dev/null || true
+    kubectl delete pvc "$pvc_name" -n "$ns" --wait=false 2>/dev/null || true
+    sleep 2
+    
+    # Delete the pod to trigger recreation
+    if [[ -n "$pod_name" ]]; then
+      kubectl delete pod "$pod_name" -n "$ns" --wait=false 2>/dev/null || true
+    fi
+    
+    info "PVC $pvc_name deleted - will be recreated automatically"
+    return 0
+  fi
+  return 1
+}
+
 wait_progress() {
   local msg="$1"
   local timeout="$2"
@@ -409,6 +440,24 @@ wait_pods_ready() {
     if [[ ${#creating_pods[@]} -gt 0 ]]; then
       printf "    ⏳ Creating: %s\n" "$(IFS=', '; echo "${creating_pods[*]}")"
       activity_shown=true
+      
+      # Check for LINSTOR mount failures after 2 minutes of ContainerCreating
+      if [[ $elapsed -gt 120 ]]; then
+        for pod_name in $(echo "$pod_data" | grep "ContainerCreating" | awk '{print $1}'); do
+          local mount_events=$(kubectl describe pod "$pod_name" -n "$ns" 2>/dev/null | grep -E "FailedMount.*Bad magic number|FailedMount.*superblock")
+          if [[ -n "$mount_events" ]]; then
+            # Extract PVC name from mount error
+            local stuck_pvc=$(echo "$mount_events" | grep -oE 'pvc-[a-f0-9-]+' | head -1)
+            if [[ -n "$stuck_pvc" ]]; then
+              # Find the PVC name (not the PV name)
+              local pvc_claim=$(kubectl get pvc -n "$ns" --no-headers 2>/dev/null | grep "$stuck_pvc" | awk '{print $1}')
+              if [[ -n "$pvc_claim" ]]; then
+                fix_stuck_pvc_mount "$ns" "$pvc_claim"
+              fi
+            fi
+          fi
+        done
+      fi
     fi
     
     if [[ ${#starting_pods[@]} -gt 0 ]]; then

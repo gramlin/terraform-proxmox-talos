@@ -499,7 +499,9 @@ class ClusterDashboard:
             pods = data.get("items", [])
             
             # Track which components we've found
-            found = {"etcd": False, "apiserver": False, "scheduler": False, "controller-manager": False}
+            # Note: In Talos, etcd runs as a system service, not a k8s pod
+            # So we check apiserver, scheduler, controller-manager (3 components)
+            found = {"apiserver": False, "scheduler": False, "controller-manager": False}
             
             for pod in pods:
                 name = pod.get("metadata", {}).get("name", "").lower()
@@ -507,38 +509,34 @@ class ClusterDashboard:
                 is_running = phase == "Running"
                 
                 # Match specific component names
-                if name.startswith("etcd-") or "etcd" in name:
+                if "kube-apiserver" in name:
                     if is_running:
                         checkpoints[0].status = Status.SUCCESS
-                        found["etcd"] = True
-                    elif not found["etcd"]:
-                        checkpoints[0].status = Status.WAITING
-                        
-                elif "kube-apiserver" in name:
-                    if is_running:
-                        checkpoints[1].status = Status.SUCCESS
                         found["apiserver"] = True
                     elif not found["apiserver"]:
-                        checkpoints[1].status = Status.WAITING
+                        checkpoints[0].status = Status.WAITING
                         
                 elif "kube-scheduler" in name:
                     if is_running:
-                        checkpoints[2].status = Status.SUCCESS
+                        checkpoints[1].status = Status.SUCCESS
                         found["scheduler"] = True
                     elif not found["scheduler"]:
-                        checkpoints[2].status = Status.WAITING
+                        checkpoints[1].status = Status.WAITING
                         
                 elif "kube-controller-manager" in name:
                     if is_running:
-                        checkpoints[3].status = Status.SUCCESS
+                        checkpoints[2].status = Status.SUCCESS
                         found["controller-manager"] = True
                     elif not found["controller-manager"]:
-                        checkpoints[3].status = Status.WAITING
+                        checkpoints[2].status = Status.WAITING
             
-            ready = sum(1 for cp in checkpoints if cp.status == Status.SUCCESS)
-            if ready == 4:
+            # Also mark 4th checkpoint as success if we have the 3 core components
+            # (checkpoint layout has 4 slots but Talos only has 3 visible components)
+            ready = sum(1 for cp in checkpoints[:3] if cp.status == Status.SUCCESS)
+            if ready == 3:
+                checkpoints[3].status = Status.SUCCESS
                 return Status.SUCCESS, "Control plane up"
-            return Status.WAITING, f"{ready}/4 comps"
+            return Status.WAITING, f"{ready}/3 comps"
         except:
             return Status.WAITING, "Parsing"
             return Status.WAITING, "Parsing"
@@ -1020,12 +1018,17 @@ class ClusterDashboard:
                 name = pod.get("metadata", {}).get("name", "").lower()
                 ready = is_ready(pod)
                 
-                if "controller" in name or ("cert-manager" in name and "webhook" not in name and "cainjector" not in name):
-                    checkpoints[0].status = Status.SUCCESS if ready else Status.WAITING
-                elif "webhook" in name:
+                # Skip startup/job pods
+                if "startupapicheck" in name:
+                    continue
+                
+                if "webhook" in name:
                     checkpoints[1].status = Status.SUCCESS if ready else Status.WAITING
                 elif "cainjector" in name:
                     checkpoints[2].status = Status.SUCCESS if ready else Status.WAITING
+                elif "cert-manager" in name:
+                    # Main controller pod
+                    checkpoints[0].status = Status.SUCCESS if ready else Status.WAITING
             
             # Check ClusterIssuer (optional - don't block on it)
             issuer_success, issuer_output = self._kubectl(["get", "clusterissuer", "-o", "json"])
