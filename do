@@ -1708,9 +1708,18 @@ deploy_gitea() {
   helm $cmd gitea gitea-charts/gitea \
     --namespace "$ns" \
     --version "$GITEA_VERSION" \
+    --set gitea.admin.username=gitea \
     --set gitea.admin.password="$GITEA_ADMIN_PASSWORD" \
+    --set gitea.config.database.DB_TYPE=sqlite3 \
+    --set gitea.config.session.PROVIDER=memory \
+    --set gitea.config.cache.ADAPTER=memory \
+    --set gitea.config.queue.TYPE=level \
+    --set postgresql-ha.enabled=false \
+    --set postgresql.enabled=false \
+    --set redis-cluster.enabled=false \
+    --set redis.enabled=false \
     --set persistence.enabled=true \
-    --set persistence.storageClass="$STORAGECLASS_NAME" \
+    --set persistence.storageClass="$STORAGE_CLASS_NAME" \
     --set persistence.size=10Gi \
     --set ingress.enabled=true \
     --set ingress.className=traefik \
