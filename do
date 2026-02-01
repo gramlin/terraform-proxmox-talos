@@ -627,6 +627,18 @@ export TF_RESOURCES_FILE="${WORKDIR}/.tf-resources.json"
 export TALOS_STATUS_FILE="${WORKDIR}/.talos-status.json"
 export LINSTOR_STATUS_FILE="${WORKDIR}/.linstor-status.json"
 export PROXMOX_STATUS_FILE="${WORKDIR}/.proxmox-status.json"
+export DASHBOARD_STATUS_FILE="${WORKDIR}/.dashboard-status.json"
+
+# Initialize all dashboard status files (call at start of any command)
+init_dashboard_status() {
+  local ts
+  ts=$(date -Iseconds)
+  echo '{"resources":[],"status":"idle","timestamp":"'"$ts"'"}' > "$TF_RESOURCES_FILE"
+  echo '{"operations":[],"status":"idle","timestamp":"'"$ts"'"}' > "$TALOS_STATUS_FILE"
+  echo '{"operations":[],"status":"idle","timestamp":"'"$ts"'"}' > "$LINSTOR_STATUS_FILE"
+  echo '{"vms":[],"status":"idle","timestamp":"'"$ts"'"}' > "$PROXMOX_STATUS_FILE"
+  echo '{"current_step":"Starting...","status":"running","message":"","timestamp":"'"$ts"'"}' > "$DASHBOARD_STATUS_FILE"
+}
 
 # Initialize terraform resources tracking
 init_tf_resources() {
@@ -2947,6 +2959,14 @@ main() {
   load_config
   
   local cmd="${1:-}"
+  
+  # Initialize dashboard status files for commands that use tracking
+  case "$cmd" in
+    plan|apply|plan-apply|destroy)
+      init_dashboard_status
+      ;;
+  esac
+  
   case "$cmd" in
     plan)              cmd_plan ;;
     apply)             cmd_apply ;;
