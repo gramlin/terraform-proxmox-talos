@@ -3409,6 +3409,17 @@ cmd_plan() {
 }
 
 cmd_apply() {
+  # Clear previous run tracking to give user clean slate
+  info "Clearing previous run tracking files..."
+  rm -f "$WORKDIR"/.dashboard-status.json
+  rm -f "$WORKDIR"/.tf-resources.json
+  rm -f "$WORKDIR"/.talos-status.json
+  rm -f "$WORKDIR"/.linstor-status.json
+  rm -f "$WORKDIR"/.proxmox-status.json
+  
+  # Initialize fresh dashboard state
+  update_dashboard_step "initializing" "idle"
+  
   show_config
   
   # Start Proxmox VM monitor for dashboard
