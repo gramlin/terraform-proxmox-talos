@@ -461,22 +461,43 @@ wait_pods_ready() {
       printf "    ⏳ Creating: %s\n" "$(IFS=', '; echo "${creating_pods[*]}")"
       activity_shown=true
       
-      # Check for LINSTOR mount failures after 60 seconds of ContainerCreating or Pending
-      if [[ $elapsed -gt 60 ]]; then
-        for pod_name in $(echo "$pod_data" | grep -E "ContainerCreating|Pending" | awk '{print $1}'); do
-          # Look for any mount-related failures (fsck, mount errors)
-          local mount_events=$(kubectl describe pod "$pod_name" -n "$ns" 2>/dev/null | grep -E "FailedMount|MountVolume.SetUp failed|failed to run fsck|Bad magic number" || true)
+      # Check for LINSTOR mount failures after 30 seconds (reduced from 60)
+      if [[ $elapsed -gt 30 ]]; then
+        # Check ALL non-ready pods, not just specific states
+        while IFS= read -r line; do
+          if [[ -z "$line" ]]; then continue; fi
+          
+          local pod_name=$(echo "$line" | awk '{print $1}')
+          local pod_ready=$(echo "$line" | awk '{print $2}')
+          local containers_ready=${pod_ready%/*}
+          local containers_total=${pod_ready#*/}
+          
+          # Skip if already ready
+          if [[ "$containers_ready" == "$containers_total" ]] && [[ "$containers_total" != "0" ]]; then
+            continue
+          fi
+          
+          # Check for mount failures in events (look at last 10 events)
+          local mount_events=$(kubectl get events -n "$ns" \
+            --field-selector involvedObject.name="$pod_name" \
+            --sort-by='.lastTimestamp' 2>/dev/null | \
+            tail -10 | \
+            grep -E "FailedMount|MountVolume.SetUp failed|failed to run fsck|Bad magic number" || true)
+          
           if [[ -n "$mount_events" ]]; then
-            warn "Detected mount failure for pod $pod_name - recreating PVCs..."
-            # Try to find and fix all PVCs used by this pod
+            warn "🔧 Fixing mount failure for pod $pod_name (${elapsed}s elapsed)"
+            # Get PVCs used by this pod
             local pvc_names=$(kubectl get pod "$pod_name" -n "$ns" -o jsonpath='{.spec.volumes[*].persistentVolumeClaim.claimName}' 2>/dev/null || true)
             for pvc_claim in $pvc_names; do
               if [[ -n "$pvc_claim" ]]; then
+                info "  → Recreating PVC: $pvc_claim"
                 fix_stuck_pvc_mount "$ns" "$pvc_claim" || true
               fi
             done
+            # Small delay to let cleanup happen
+            sleep 3
           fi
-        done
+        done <<< "$pod_data"
       fi
     fi
     
