@@ -152,8 +152,8 @@ apply_profile() {
     full)
       INGRESS_CONTROLLER="traefik"
       INSTALL_HARBOR="true"
-      INSTALL_MONITORING="false"
-      INSTALL_GITEA="false"
+      INSTALL_MONITORING="true"
+      INSTALL_GITEA="true"
       ;;
     custom)
       # Use individual settings as-is
@@ -1433,7 +1433,7 @@ test_talos_api() {
 
 test_etcd_health() {
   local start=$(date +%s)
-  if [[ -f "$TALOS_CONFIG" ]]; then
+  if [[ -f "${TALOSCONFIG:-$TALOSCONFIG_OUT}" ]]; then
     local etcd_status=$(talosctl etcd status 2>&1 || true)
     if echo "$etcd_status" | grep -q "HEALTHY"; then
       local members=$(echo "$etcd_status" | grep -c "HEALTHY" || echo 0)
@@ -1451,7 +1451,7 @@ test_etcd_health() {
 
 test_talos_services() {
   local start=$(date +%s)
-  if [[ -f "$TALOS_CONFIG" ]]; then
+  if [[ -f "${TALOSCONFIG:-$TALOSCONFIG_OUT}" ]]; then
     local svc_status=$(talosctl services 2>&1 | head -20 || true)
     local running=$(echo "$svc_status" | grep -c "Running" || echo 0)
     local dur=$(($(date +%s) - start))
