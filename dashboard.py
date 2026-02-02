@@ -188,6 +188,7 @@ class ClusterDashboard:
         self.preflight_status = {}  # Preflight check status
         self._status_thread = None  # Background status checker
         self._status_running = False
+        self.page_rotation = 0  # For rotating health pages on completion
         self._init_steps()
         self._init_preflight()
 
@@ -1726,6 +1727,62 @@ class ClusterDashboard:
         
         return text
 
+    def _get_completion_page(self) -> tuple:
+        """Return the current completion page (title, content_widget).
+        Rotates through different health check pages every 5 seconds."""
+        # Rotate pages every 5 seconds (15 frames at ~3 fps)
+        page_index = (self.frame // 15) % 4
+        
+        if page_index == 0:
+            # Cluster Health
+            return ("⚡ Cluster Status", Panel(
+                self.render_cluster_health(), 
+                border_style="#44FF44", 
+                style=BG_STYLE
+            ))
+        elif page_index == 1:
+            # Test Results
+            test_results = self._load_test_results()
+            if test_results and test_results.get("tests"):
+                return ("🧪 Test Results", Panel(
+                    self.render_test_cards(),
+                    border_style="#FFAA00",
+                    style=BG_STYLE
+                ))
+            else:
+                # Fallback to proxmox if no tests
+                page_index = 2
+        
+        if page_index == 2:
+            # Proxmox VMs
+            proxmox_data = self._load_proxmox_status()
+            if proxmox_data.get("vms"):
+                return ("🖥️  VMs", Panel(
+                    self.render_proxmox_status(),
+                    border_style="#3366FF",
+                    style=BG_STYLE
+                ))
+            else:
+                page_index = 3
+        
+        if page_index == 3:
+            # Info / Next Steps
+            info_text = Text()
+            info_text.append("✓ Cluster deployment complete!\n\n", style="bold #008800")
+            info_text.append("Next steps:\n", style="bold #000000")
+            info_text.append("  • Run './do report' for full deployment status\n", style="#000000")
+            info_text.append("  • Run './do info' for access information\n", style="#000000")
+            info_text.append("  • Run './do test' for validation tests\n", style="#000000")
+            info_text.append("\nDashboard rotates through health metrics every 5 seconds.", style="#444444")
+            return ("📊 Info", Panel(info_text, border_style="#CCCCCC", style=BG_STYLE))
+        
+        # Default fallback
+        return ("📊 Info", Panel(
+            Text("Cluster deployment complete!\nRun './do report' for status"),
+            border_style="#444444",
+            style=BG_STYLE
+        ))
+
     def render_celebration(self) -> Text:
         """Render completion status (simple, readable)."""
         text = Text()
@@ -2451,27 +2508,36 @@ class ClusterDashboard:
                 )
             layout["celebration"].update(Panel(self.render_celebration(), border_style="#FFD700", style=BG_STYLE, title="🏆 VICTORY", title_align="center"))
             
-            # In main, show cluster health
+            # Rotating health pages in main area
             layout["main"].split_row(
                 Layout(name="health", ratio=2),
                 Layout(name="monitoring", ratio=2)
             )
             
-            # Cluster health on left
-            layout["health"].update(Panel(self.render_cluster_health(), border_style="#44FF44", style=BG_STYLE, title="⚡ Cluster Status"))
+            # Get current page based on rotation
+            page_title, page_widget = self._get_completion_page()
             
-            # Show tests or proxmox on right
+            # Show rotating pages on left (main content)
+            layout["health"].update(page_widget)
+            
+            # Show completion stats on right
+            stats_text = Text()
+            elapsed = int(time.time() - self.start_time)
+            mins, secs = divmod(elapsed, 60)
+            stats_text.append("Deployment Stats\n", style="bold #000000")
+            stats_text.append(f"\nTotal time: {mins}m {secs}s\n", style="#000000")
+            stats_text.append(f"Steps completed: {len([s for s in self.steps if s.status == Status.SUCCESS])}/{len(self.steps)}\n", style="#000000")
+            
+            # Test summary if available
             test_results = self._load_test_results()
             if test_results and test_results.get("tests"):
-                layout["monitoring"].update(Panel(self.render_test_cards(), border_style="#444444", style=BG_STYLE, title="🧪 Tests"))
-            else:
-                proxmox_data = self._load_proxmox_status()
-                if proxmox_data.get("vms"):
-                    layout["monitoring"].update(Panel(self.render_proxmox_status(), border_style="#444444", style=BG_STYLE, title="🖥️ VMs"))
-                else:
-                    # Placeholder if nothing else
-                    info_text = Text("🎊 Cluster deployment complete!\n\nRun './do report' for full status")
-                    layout["monitoring"].update(Panel(info_text, border_style="#444444", style=BG_STYLE, title="📊 Info"))
+                passed = test_results.get("passed", 0)
+                failed = test_results.get("failed", 0)
+                total = passed + failed
+                stats_text.append(f"Tests: {passed}/{total} passed", style="bold #008800" if failed == 0 else "bold #CC0000")
+            
+            stats_text.append("\n\n(Rotating pages every 5s)", style="#888888")
+            layout["monitoring"].update(Panel(stats_text, border_style="#CCCCCC", style=BG_STYLE, title="📈 Summary"))
         else:
             if self.blinkenlicht:
                 layout.split_column(
