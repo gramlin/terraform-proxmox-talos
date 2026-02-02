@@ -237,7 +237,49 @@ class ClusterDashboard:
                 return path
         return os.path.join(self.workdir, "kubeconfig.yml")
 
+    def _load_config(self) -> dict:
+        """Load do.cfg configuration"""
+        config = {
+            "INSTALL_HARBOR": "true",
+            "INSTALL_MONITORING": "true",
+            "INSTALL_GITEA": "true",
+        }
+        
+        # Try do.local.cfg first (overrides), then do.cfg
+        for cfg_file in ["do.local.cfg", "do.cfg"]:
+            cfg_path = os.path.join(self.workdir, cfg_file)
+            if os.path.isfile(cfg_path):
+                try:
+                    with open(cfg_path, 'r') as f:
+                        for line in f:
+                            line = line.strip()
+                            # Skip comments and empty lines
+                            if not line or line.startswith('#'):
+                                continue
+                            # Parse KEY="value" or KEY=value
+                            if '=' in line:
+                                key, value = line.split('=', 1)
+                                key = key.strip()
+                                value = value.strip().strip('"').strip("'")
+                                if key in config:
+                                    config[key] = value
+                except Exception:
+                    pass
+        
+        # Normalize boolean values
+        for key in config:
+            val = config[key].lower()
+            if val in ["true", "1", "yes"]:
+                config[key] = True
+            elif val in ["false", "0", "no"]:
+                config[key] = False
+        
+        return config
+
     def _init_steps(self):
+        # Load config to determine which components to show
+        config = self._load_config()
+        
         self.steps = [
             Step("tfplan", "TF Plan",
                  check_fn=self._check_tf_plan,
@@ -281,19 +323,36 @@ class ClusterDashboard:
             Step("certmgr", "CertMgr",
                  check_fn=self._check_certmanager,
                  checkpoints=[Checkpoint("ctl"), Checkpoint("hook"), Checkpoint("inj"), Checkpoint("issu")]),
-            Step("monitoring", "Monitor",
-                 check_fn=self._check_monitoring,
-                 checkpoints=[Checkpoint("prom"), Checkpoint("graf"), Checkpoint("alert"), Checkpoint("node"), Checkpoint("kube")]),
-            Step("harbor", "Harbor",
-                 check_fn=self._check_harbor,
-                 checkpoints=[Checkpoint("pvc"), Checkpoint("db"), Checkpoint("red"), Checkpoint("core"), Checkpoint("reg"), Checkpoint("job"), Checkpoint("tri")]),
-            Step("gitea", "Gitea",
-                 check_fn=self._check_gitea,
-                 checkpoints=[Checkpoint("pvc"), Checkpoint("db"), Checkpoint("app"), Checkpoint("ing")]),
+        ]
+        
+        # Add optional components based on config
+        if config.get("INSTALL_MONITORING", True):
+            self.steps.append(
+                Step("monitoring", "Monitor",
+                     check_fn=self._check_monitoring,
+                     checkpoints=[Checkpoint("prom"), Checkpoint("graf"), Checkpoint("alert"), Checkpoint("node"), Checkpoint("kube")])
+            )
+        
+        if config.get("INSTALL_HARBOR", True):
+            self.steps.append(
+                Step("harbor", "Harbor",
+                     check_fn=self._check_harbor,
+                     checkpoints=[Checkpoint("pvc"), Checkpoint("db"), Checkpoint("red"), Checkpoint("core"), Checkpoint("reg"), Checkpoint("job"), Checkpoint("tri")])
+            )
+        
+        if config.get("INSTALL_GITEA", True):
+            self.steps.append(
+                Step("gitea", "Gitea",
+                     check_fn=self._check_gitea,
+                     checkpoints=[Checkpoint("pvc"), Checkpoint("db"), Checkpoint("app"), Checkpoint("ing")])
+            )
+        
+        # Always add ingress check last
+        self.steps.append(
             Step("ingress", "Ingress",
                  check_fn=self._check_ingress,
-                 checkpoints=[Checkpoint("cert"), Checkpoint("issuer"), Checkpoint("ing")]),
-        ]
+                 checkpoints=[Checkpoint("cert"), Checkpoint("issuer"), Checkpoint("ing")])
+        )
 
     def _kubectl(self, args: List[str], timeout: int = 10) -> tuple:
         try:
