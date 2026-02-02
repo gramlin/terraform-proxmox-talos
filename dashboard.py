@@ -1384,8 +1384,10 @@ class ClusterDashboard:
                 if step_name_lower == "monitoring":
                     is_actively_running = True
         
-        # If actively running, show orange spinner even if status is SUCCESS
-        if is_actively_running and step.status == Status.SUCCESS:
+        # IMPORTANT: Only show orange if status from .dashboard-status.json is "running"
+        # If status is "complete", don't override with orange
+        step_status = dashboard_status.get("status", "")
+        if is_actively_running and step.status == Status.SUCCESS and step_status == "running":
             icon = SPINNER_FRAMES[self.frame % len(SPINNER_FRAMES)]
             return Text(icon, style="#FF8800 bold")  # Orange for re-run
         

@@ -246,14 +246,28 @@ update_dashboard_step() {
 }
 
 step() { 
+  # Mark previous step as complete if there was one
+  if [[ -n "${CURRENT_STEP:-}" ]]; then
+    update_dashboard_step "$CURRENT_STEP" "complete"
+  fi
+  
   _log ""; _log "### $* ###"
+  export CURRENT_STEP="$*"
   update_dashboard_step "$*" "running"
 }
+
+step_done() {
+  # Mark current step as complete
+  if [[ -n "${CURRENT_STEP:-}" ]]; then
+    update_dashboard_step "$CURRENT_STEP" "complete"
+  fi
+}
+
 info() { _log "INFO: $*"; }
 warn() { _log_err "WARN: $*"; }
 die() { 
   _log_err "ERROR: $*"
-  update_dashboard_step "ERROR" "failed" "$*"
+  update_dashboard_step "${CURRENT_STEP:-ERROR}" "failed" "$*"
   exit 1
 }
 
