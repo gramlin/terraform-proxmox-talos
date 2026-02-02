@@ -1348,18 +1348,41 @@ class ClusterDashboard:
         
         # Map step names to tracking indicators
         step_name_lower = step.name.lower()
-        if "terraform" in current_step or "tf" in current_step:
-            if step_name_lower in ["tfplan", "tfapply"]:
-                is_actively_running = True
-        elif "talos" in current_step or "bootstrap" in current_step:
-            if step_name_lower in ["talos_cfg", "talos_boot"]:
-                is_actively_running = True
-        elif "storage" in current_step or "linstor" in current_step or "piraeus" in current_step:
-            if step_name_lower in ["piraeus", "linstor", "satellites", "storage", "sc"]:
-                is_actively_running = True
-        elif any(x in current_step for x in ["traefik", "harbor", "gitea", "monitoring"]):
-            if step_name_lower in ["traefik", "harbor", "gitea", "monitoring"]:
-                is_actively_running = True
+        
+        # More flexible matching - check for keywords in current_step
+        if current_step:
+            # Terraform-related (includes "read terraform outputs")
+            if "terraform" in current_step or "tf" in current_step:
+                if step_name_lower in ["tfplan", "tfapply", "vms"]:
+                    is_actively_running = True
+            # Talos-related
+            elif "talos" in current_step or "bootstrap" in current_step or "kubeconfig" in current_step:
+                if step_name_lower in ["talos_cfg", "talos_boot", "nodes"]:
+                    is_actively_running = True
+            # Storage-related
+            elif "storage" in current_step or "linstor" in current_step or "piraeus" in current_step or "satellite" in current_step or "pool" in current_step:
+                if step_name_lower in ["piraeus", "linstor", "satellites", "storage", "sc"]:
+                    is_actively_running = True
+            # Networking
+            elif "cilium" in current_step:
+                if step_name_lower == "cilium":
+                    is_actively_running = True
+            # Apps and services
+            elif "traefik" in current_step:
+                if step_name_lower == "traefik":
+                    is_actively_running = True
+            elif "cert" in current_step:
+                if step_name_lower in ["certmgr", "ingress"]:
+                    is_actively_running = True
+            elif "harbor" in current_step:
+                if step_name_lower == "harbor":
+                    is_actively_running = True
+            elif "gitea" in current_step:
+                if step_name_lower == "gitea":
+                    is_actively_running = True
+            elif "monitor" in current_step or "prometheus" in current_step or "grafana" in current_step:
+                if step_name_lower == "monitoring":
+                    is_actively_running = True
         
         # If actively running, show orange spinner even if status is SUCCESS
         if is_actively_running and step.status == Status.SUCCESS:
