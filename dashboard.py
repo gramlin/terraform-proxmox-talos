@@ -1797,6 +1797,117 @@ class ClusterDashboard:
                 pass
         return {"operations": [], "status": "idle"}
 
+    def _query_prometheus(self, query: str, timeout: int = 5) -> Optional[dict]:
+        """Query Prometheus via port-forward"""
+        try:
+            # Try to port-forward to prometheus
+            pf_cmd = [
+                "kubectl", "port-forward", 
+                "-n", "monitoring",
+                "svc/kube-prometheus-stack-prometheus", 
+                "9090:9090", 
+                "-q"
+            ]
+            
+            # Start port-forward in background (will timeout and close itself)
+            pf_proc = subprocess.Popen(pf_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            
+            # Give it a moment to establish
+            time.sleep(0.2)
+            
+            # Query prometheus
+            import urllib.request
+            import urllib.error
+            import urllib.parse
+            
+            url = f"http://localhost:9090/api/v1/query?query={urllib.parse.quote(query)}"
+            try:
+                with urllib.request.urlopen(url, timeout=timeout) as response:
+                    data = json.loads(response.read().decode())
+                    return data
+            except (urllib.error.URLError, urllib.error.HTTPError, OSError, TimeoutError):
+                return None
+            finally:
+                try:
+                    pf_proc.terminate()
+                    pf_proc.wait(timeout=1)
+                except:
+                    pf_proc.kill()
+        except:
+            return None
+    
+    def _get_cluster_metrics(self) -> dict:
+        """Get key cluster health metrics from Prometheus"""
+        metrics = {
+            "cpu_usage": 0,
+            "memory_usage": 0,
+            "disk_usage": 0,
+            "pod_restarts": 0,
+            "alerts_firing": 0,
+            "nodes_ready": 0,
+            "nodes_total": 0,
+            "pvcs_pending": 0,
+            "errors": []
+        }
+        
+        try:
+            # Node readiness
+            success, output = self._kubectl(["get", "nodes", "-o", "json"], timeout=5)
+            if success:
+                data = json.loads(output)
+                nodes = data.get("items", [])
+                metrics["nodes_total"] = len(nodes)
+                ready_count = 0
+                for node in nodes:
+                    conditions = node.get("status", {}).get("conditions", [])
+                    if any(c.get("type") == "Ready" and c.get("status") == "True" for c in conditions):
+                        ready_count += 1
+                metrics["nodes_ready"] = ready_count
+            
+            # PVC status
+            success, output = self._kubectl(["get", "pvc", "-A", "-o", "json"], timeout=5)
+            if success:
+                data = json.loads(output)
+                pvcs = data.get("items", [])
+                pending = sum(1 for pvc in pvcs if pvc.get("status", {}).get("phase") != "Bound")
+                metrics["pvcs_pending"] = pending
+            
+            # Pod restarts in last hour
+            success, output = self._kubectl([
+                "get", "pods", "-A",
+                "-o", "json"
+            ], timeout=5)
+            if success:
+                data = json.loads(output)
+                pods = data.get("items", [])
+                total_restarts = 0
+                for pod in pods:
+                    for container in pod.get("status", {}).get("containerStatuses", []):
+                        total_restarts += container.get("restartCount", 0)
+                metrics["pod_restarts"] = total_restarts
+            
+            # Try to query prometheus for more detailed metrics (non-blocking)
+            prom_data = self._query_prometheus('sum(rate(node_cpu_seconds_total[5m])) * 100', timeout=2)
+            if prom_data and prom_data.get("data", {}).get("result"):
+                try:
+                    cpu = float(prom_data["data"]["result"][0]["value"][1])
+                    metrics["cpu_usage"] = min(100, cpu)
+                except:
+                    pass
+            
+            prom_data = self._query_prometheus('sum(container_memory_usage_bytes) / sum(machine_memory_bytes) * 100', timeout=2)
+            if prom_data and prom_data.get("data", {}).get("result"):
+                try:
+                    mem = float(prom_data["data"]["result"][0]["value"][1])
+                    metrics["memory_usage"] = min(100, mem)
+                except:
+                    pass
+                    
+        except Exception as e:
+            metrics["errors"].append(str(e)[:30])
+        
+        return metrics
+
     def _load_proxmox_status(self) -> dict:
         """Load proxmox VM status from JSON file"""
         proxmox_file = os.path.join(self.workdir, ".proxmox-status.json")
@@ -1807,6 +1918,91 @@ class ClusterDashboard:
             except (json.JSONDecodeError, IOError):
                 pass
         return {"vms": [], "status": "idle"}
+
+    def render_cluster_health(self) -> Table:
+        """Render cluster health metrics from monitoring"""
+        metrics = self._get_cluster_metrics()
+        
+        table = Table(title="Cluster Health", show_header=False, border_style="#444444", box=None, title_style="#000000", expand=True)
+        table.add_column("Metric", ratio=2, style="#000000", no_wrap=True)
+        table.add_column("Value", ratio=1, justify="right")
+        table.add_column("Status", ratio=1)
+        
+        # Nodes
+        nodes_status = "✓" if metrics["nodes_ready"] == metrics["nodes_total"] and metrics["nodes_total"] > 0 else "⚠"
+        if metrics["nodes_total"] == 0:
+            nodes_text = Text("pending", style="#666666")
+        else:
+            nodes_text = Text(f"{metrics['nodes_ready']}/{metrics['nodes_total']}", style="#000000")
+        nodes_icon = Text(nodes_status, style="#33FF33" if "✓" in nodes_status else "#FFAA33")
+        table.add_row("Nodes Ready", nodes_text, nodes_icon)
+        
+        # CPU Usage
+        cpu = metrics.get("cpu_usage", 0)
+        if cpu == 0:
+            cpu_text = Text("N/A", style="#666666")
+            cpu_icon = Text("○", style="#666666")
+        elif cpu > 80:
+            cpu_text = Text(f"{cpu:.1f}%", style="#FF3333")
+            cpu_icon = Text("●", style="#FF3333 bold")
+        elif cpu > 50:
+            cpu_text = Text(f"{cpu:.1f}%", style="#FFAA33")
+            cpu_icon = Text("●", style="#FFAA33 bold")
+        else:
+            cpu_text = Text(f"{cpu:.1f}%", style="#33FF33")
+            cpu_icon = Text("●", style="#33FF33")
+        table.add_row("CPU Usage", cpu_text, cpu_icon)
+        
+        # Memory Usage
+        mem = metrics.get("memory_usage", 0)
+        if mem == 0:
+            mem_text = Text("N/A", style="#666666")
+            mem_icon = Text("○", style="#666666")
+        elif mem > 85:
+            mem_text = Text(f"{mem:.1f}%", style="#FF3333")
+            mem_icon = Text("●", style="#FF3333 bold")
+        elif mem > 70:
+            mem_text = Text(f"{mem:.1f}%", style="#FFAA33")
+            mem_icon = Text("●", style="#FFAA33 bold")
+        else:
+            mem_text = Text(f"{mem:.1f}%", style="#33FF33")
+            mem_icon = Text("●", style="#33FF33")
+        table.add_row("Memory Usage", mem_text, mem_icon)
+        
+        # PVC Status
+        pending_pvcs = metrics.get("pvcs_pending", 0)
+        if pending_pvcs == 0:
+            pvc_text = Text("OK", style="#33FF33")
+            pvc_icon = Text("✓", style="#33FF33")
+        else:
+            pvc_text = Text(f"{pending_pvcs} pending", style="#FFAA33")
+            pvc_icon = Text(f"⚠", style="#FFAA33")
+        table.add_row("Storage PVCs", pvc_text, pvc_icon)
+        
+        # Pod Restarts
+        restarts = metrics.get("pod_restarts", 0)
+        if restarts == 0:
+            restart_text = Text("0", style="#33FF33")
+            restart_icon = Text("✓", style="#33FF33")
+        elif restarts < 5:
+            restart_text = Text(f"{restarts}", style="#FFAA33")
+            restart_icon = Text("⚠", style="#FFAA33")
+        else:
+            restart_text = Text(f"{restarts}", style="#FF3333")
+            restart_icon = Text("●", style="#FF3333")
+        table.add_row("Pod Restarts", restart_text, restart_icon)
+        
+        # Add error info if any
+        errors = metrics.get("errors", [])
+        if errors:
+            for error in errors[:2]:
+                table.add_row(
+                    Text("Error", style="#FF3333"),
+                    Text(error[:20], style="#FF3333"),
+                    Text("!", style="#FF3333")
+                )
+        
+        return table
 
     def render_proxmox_status(self) -> Table:
         """Render Proxmox VM status"""
@@ -2137,7 +2333,7 @@ class ClusterDashboard:
         layout = Layout()
         
         if all_done:
-            # CELEBRATION MODE! 🎉
+            # CELEBRATION MODE! 🎉 - Show cluster health instead of deployment steps
             if self.blinkenlicht:
                 layout.split_column(
                     Layout(name="header", size=3),
@@ -2154,6 +2350,28 @@ class ClusterDashboard:
                     Layout(name="footer", size=3)
                 )
             layout["celebration"].update(Panel(self.render_celebration(), border_style="#FFD700", style=BG_STYLE, title="🏆 VICTORY", title_align="center"))
+            
+            # In main, show cluster health
+            layout["main"].split_row(
+                Layout(name="health", ratio=2),
+                Layout(name="monitoring", ratio=2)
+            )
+            
+            # Cluster health on left
+            layout["health"].update(Panel(self.render_cluster_health(), border_style="#44FF44", style=BG_STYLE, title="⚡ Cluster Status"))
+            
+            # Show tests or proxmox on right
+            test_results = self._load_test_results()
+            if test_results and test_results.get("tests"):
+                layout["monitoring"].update(Panel(self.render_test_cards(), border_style="#444444", style=BG_STYLE, title="🧪 Tests"))
+            else:
+                proxmox_data = self._load_proxmox_status()
+                if proxmox_data.get("vms"):
+                    layout["monitoring"].update(Panel(self.render_proxmox_status(), border_style="#444444", style=BG_STYLE, title="🖥️ VMs"))
+                else:
+                    # Placeholder if nothing else
+                    info_text = Text("🎊 Cluster deployment complete!\n\nRun './do report' for full status")
+                    layout["monitoring"].update(Panel(info_text, border_style="#444444", style=BG_STYLE, title="📊 Info"))
         else:
             if self.blinkenlicht:
                 layout.split_column(
@@ -2169,87 +2387,91 @@ class ClusterDashboard:
                     Layout(name="footer", size=3)
                 )
         
-        # Main area: steps on left, operations in middle, tests on right
-        # Dynamically build middle column based on what has data
-        tf_data = self._load_tf_resources()
-        talos_data = self._load_talos_status()
-        linstor_data = self._load_linstor_status()
-        proxmox_data = self._load_proxmox_status()
-        test_results = self._load_test_results()
+        # Main area: steps on left, operations in middle, tests on right (only when not all_done)
+        if not all_done:
+            # Dynamically build middle column based on what has data
+            tf_data = self._load_tf_resources()
+            talos_data = self._load_talos_status()
+            linstor_data = self._load_linstor_status()
+            proxmox_data = self._load_proxmox_status()
+            test_results = self._load_test_results()
+            
+            # Check what's active/complete
+            tf_active = tf_data.get("status") == "running" and tf_data.get("resources")
+            tf_complete = tf_data.get("status") == "complete"
+            talos_active = talos_data.get("status") == "running" and talos_data.get("operations")
+            talos_complete = talos_data.get("status") == "complete"
+            linstor_active = linstor_data.get("status") == "running" and linstor_data.get("operations")
+            linstor_complete = linstor_data.get("status") == "complete"
+            proxmox_has_vms = bool(proxmox_data.get("vms"))
+            tests_have_data = test_results and test_results.get("tests")
+            pvcs_active = any(s.description == "Storage Pool" and s.status == Status.DONE for s in self.steps)
+            
+            # Build middle panels list (only show active/incomplete)
+            middle_panels = []
+            
+            # Check if there's any operation panel activity
+            has_operation_panels = proxmox_has_vms or tf_active or talos_active or linstor_active \
+                or (not tf_complete and tf_data.get("resources")) \
+                or (not talos_complete and talos_data.get("operations")) \
+                or (not linstor_complete and linstor_data.get("operations"))
+            
+            # Always show preflight when nothing else is running
+            if not has_operation_panels:
+                middle_panels.append(("preflight", self.render_preflight()))
+            
+            if proxmox_has_vms:
+                middle_panels.append(("proxmox", self.render_proxmox_status()))
+            if tf_active or (not tf_complete and tf_data.get("resources")):
+                middle_panels.append(("terraform", self.render_tf_resources()))
+            if talos_active or (not talos_complete and talos_data.get("operations")):
+                middle_panels.append(("talos", self.render_talos_status()))
+            if linstor_active or (not linstor_complete and linstor_data.get("operations")):
+                middle_panels.append(("linstor", self.render_linstor_status()))
+            
+            # Build right panels (only show when has data)
+            right_panels = []
+            if tests_have_data:
+                right_panels.append(("tests", self.render_test_cards()))
+            if pvcs_active:
+                right_panels.append(("pvcs", self.render_pvc_table()))
+            
+            # Create layout based on what we have
+            if middle_panels and right_panels:
+                layout["main"].split_row(Layout(name="left", ratio=2), Layout(name="middle", ratio=3), Layout(name="right", ratio=2))
+            elif middle_panels:
+                layout["main"].split_row(Layout(name="left", ratio=2), Layout(name="middle", ratio=4))
+            elif right_panels:
+                layout["main"].split_row(Layout(name="left", ratio=3), Layout(name="right", ratio=2))
+            else:
+                layout["main"].split_row(Layout(name="left", ratio=1))
+            
+            layout["left"].split_column(Layout(name="steps", ratio=4), Layout(name="details", ratio=1))
+            
+            # Header with fancy animation
+            layout["header"].update(Panel(self.render_header_fancy(), border_style="#444444", style=BG_STYLE))
+            
+            # Steps panel
+            layout["steps"].update(Panel(self.render_step_table(), title="Steps", border_style="#444444", style=BG_STYLE))
+            layout["details"].update(Panel(self.render_checkpoint_details(), title="Active", border_style="#444444", style=BG_STYLE))
+            
+            # Middle panels (dynamic)
+            if middle_panels:
+                middle_layouts = [Layout(name=name, minimum_size=5) for name, _ in middle_panels]
+                layout["middle"].split_column(*middle_layouts)
+                for name, content in middle_panels:
+                    layout[name].update(Panel(content, border_style="#444444", style=BG_STYLE))
+            
+            # Right panels (dynamic)
+            if right_panels:
+                right_layouts = [Layout(name=name, ratio=1) for name, _ in right_panels]
+                layout["right"].split_column(*right_layouts)
+                for name, content in right_panels:
+                    title = "Tests" if name == "tests" else None
+                    layout[name].update(Panel(content, title=title, border_style="#444444", style=BG_STYLE))
         
-        # Check what's active/complete
-        tf_active = tf_data.get("status") == "running" and tf_data.get("resources")
-        tf_complete = tf_data.get("status") == "complete"
-        talos_active = talos_data.get("status") == "running" and talos_data.get("operations")
-        talos_complete = talos_data.get("status") == "complete"
-        linstor_active = linstor_data.get("status") == "running" and linstor_data.get("operations")
-        linstor_complete = linstor_data.get("status") == "complete"
-        proxmox_has_vms = bool(proxmox_data.get("vms"))
-        tests_have_data = test_results and test_results.get("tests")
-        pvcs_active = any(s.description == "Storage Pool" and s.status == Status.DONE for s in self.steps)
-        
-        # Build middle panels list (only show active/incomplete)
-        middle_panels = []
-        
-        # Check if there's any operation panel activity
-        has_operation_panels = proxmox_has_vms or tf_active or talos_active or linstor_active \
-            or (not tf_complete and tf_data.get("resources")) \
-            or (not talos_complete and talos_data.get("operations")) \
-            or (not linstor_complete and linstor_data.get("operations"))
-        
-        # Always show preflight when nothing else is running
-        if not has_operation_panels:
-            middle_panels.append(("preflight", self.render_preflight()))
-        
-        if proxmox_has_vms:
-            middle_panels.append(("proxmox", self.render_proxmox_status()))
-        if tf_active or (not tf_complete and tf_data.get("resources")):
-            middle_panels.append(("terraform", self.render_tf_resources()))
-        if talos_active or (not talos_complete and talos_data.get("operations")):
-            middle_panels.append(("talos", self.render_talos_status()))
-        if linstor_active or (not linstor_complete and linstor_data.get("operations")):
-            middle_panels.append(("linstor", self.render_linstor_status()))
-        
-        # Build right panels (only show when has data)
-        right_panels = []
-        if tests_have_data:
-            right_panels.append(("tests", self.render_test_cards()))
-        if pvcs_active:
-            right_panels.append(("pvcs", self.render_pvc_table()))
-        
-        # Create layout based on what we have
-        if middle_panels and right_panels:
-            layout["main"].split_row(Layout(name="left", ratio=2), Layout(name="middle", ratio=3), Layout(name="right", ratio=2))
-        elif middle_panels:
-            layout["main"].split_row(Layout(name="left", ratio=2), Layout(name="middle", ratio=4))
-        elif right_panels:
-            layout["main"].split_row(Layout(name="left", ratio=3), Layout(name="right", ratio=2))
-        else:
-            layout["main"].split_row(Layout(name="left", ratio=1))
-        
-        layout["left"].split_column(Layout(name="steps", ratio=4), Layout(name="details", ratio=1))
-        
-        # Header with fancy animation
+        # Header with fancy animation (for all states)
         layout["header"].update(Panel(self.render_header_fancy(), border_style="#444444", style=BG_STYLE))
-        
-        # Steps panel
-        layout["steps"].update(Panel(self.render_step_table(), title="Steps", border_style="#444444", style=BG_STYLE))
-        layout["details"].update(Panel(self.render_checkpoint_details(), title="Active", border_style="#444444", style=BG_STYLE))
-        
-        # Middle panels (dynamic)
-        if middle_panels:
-            middle_layouts = [Layout(name=name, minimum_size=5) for name, _ in middle_panels]
-            layout["middle"].split_column(*middle_layouts)
-            for name, content in middle_panels:
-                layout[name].update(Panel(content, border_style="#444444", style=BG_STYLE))
-        
-        # Right panels (dynamic)
-        if right_panels:
-            right_layouts = [Layout(name=name, ratio=1) for name, _ in right_panels]
-            layout["right"].split_column(*right_layouts)
-            for name, content in right_panels:
-                title = "Tests" if name == "tests" else None
-                layout[name].update(Panel(content, title=title, border_style="#444444", style=BG_STYLE))
         
         # BLINKENLIGHTS! (only if enabled)
         if self.blinkenlicht:
