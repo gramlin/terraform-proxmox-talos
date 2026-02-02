@@ -76,7 +76,7 @@ load_config() {
   TF_VAR_FILE=""
   PIRAEUS_VERSION_FALLBACK="true"
   
-  # Load main config
+  # Load main config first to get PROFILE setting
   if [[ -f "$WORKDIR/do.cfg" ]]; then
     # shellcheck source=/dev/null
     source "$WORKDIR/do.cfg"
@@ -87,9 +87,6 @@ load_config() {
     # shellcheck source=/dev/null
     source "$WORKDIR/do.local.cfg"
   fi
-  
-  # Apply profile settings
-  apply_profile
   
   # Normalize boolean values
   RUN_TERRAFORM=$(normalize_bool "$RUN_TERRAFORM")
@@ -142,25 +139,27 @@ normalize_bool() {
 }
 
 apply_profile() {
+  # Only apply profile defaults if values are still at script defaults
+  # This allows do.cfg to override profile settings
   case "${PROFILE,,}" in
     simple)
-      INGRESS_CONTROLLER="cilium"
-      INSTALL_HARBOR="false"
-      INSTALL_MONITORING="false"
-      INSTALL_GITEA="false"
+      : ${INGRESS_CONTROLLER:="cilium"}
+      : ${INSTALL_HARBOR:="false"}
+      : ${INSTALL_MONITORING:="false"}
+      : ${INSTALL_GITEA:="false"}
       ;;
     full)
-      INGRESS_CONTROLLER="traefik"
-      INSTALL_HARBOR="true"
-      INSTALL_MONITORING="true"
-      INSTALL_GITEA="true"
+      : ${INGRESS_CONTROLLER:="traefik"}
+      : ${INSTALL_HARBOR:="true"}
+      : ${INSTALL_MONITORING:="true"}
+      : ${INSTALL_GITEA:="true"}
       ;;
     custom)
       # Use individual settings as-is
       ;;
     *)
       # Default to full if unknown
-      INGRESS_CONTROLLER="traefik"
+      : ${INGRESS_CONTROLLER:="traefik"}
       ;;
   esac
 }
