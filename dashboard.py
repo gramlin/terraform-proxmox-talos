@@ -1340,6 +1340,32 @@ class ClusterDashboard:
 
     def render_step_icon(self, step: Step) -> Text:
         """Render step icon with animation for waiting states"""
+        
+        # Check if this step is actively running (tracking file recently updated)
+        is_actively_running = False
+        dashboard_status = self._load_dashboard_status()
+        current_step = dashboard_status.get("current_step", "").lower()
+        
+        # Map step names to tracking indicators
+        step_name_lower = step.name.lower()
+        if "terraform" in current_step or "tf" in current_step:
+            if step_name_lower in ["tfplan", "tfapply"]:
+                is_actively_running = True
+        elif "talos" in current_step or "bootstrap" in current_step:
+            if step_name_lower in ["talos_cfg", "talos_boot"]:
+                is_actively_running = True
+        elif "storage" in current_step or "linstor" in current_step or "piraeus" in current_step:
+            if step_name_lower in ["piraeus", "linstor", "satellites", "storage", "sc"]:
+                is_actively_running = True
+        elif any(x in current_step for x in ["traefik", "harbor", "gitea", "monitoring"]):
+            if step_name_lower in ["traefik", "harbor", "gitea", "monitoring"]:
+                is_actively_running = True
+        
+        # If actively running, show orange spinner even if status is SUCCESS
+        if is_actively_running and step.status == Status.SUCCESS:
+            icon = SPINNER_FRAMES[self.frame % len(SPINNER_FRAMES)]
+            return Text(icon, style="#FF8800 bold")  # Orange for re-run
+        
         if step.status == Status.WAITING:
             # Use different spinners based on step index
             idx = self.steps.index(step) if step in self.steps else 0
