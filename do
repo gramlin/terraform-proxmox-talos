@@ -340,9 +340,12 @@ fix_stuck_pvc_mount() {
   local pod_name=$(kubectl get pods -n "$ns" -o json 2>/dev/null | \
     jq -r ".items[] | select(.spec.volumes[]?.persistentVolumeClaim?.claimName == \"$pvc_name\") | .metadata.name" | head -1)
   
+  # Get PV name for LINSTOR cleanup
+  local pv_name=$(kubectl get pvc "$pvc_name" -n "$ns" -o jsonpath='{.spec.volumeName}' 2>/dev/null || echo "")
+  
   # IMPORTANT: Delete POD FIRST (so it releases the PVC)
   if [[ -n "$pod_name" ]]; then
-    info "Step 1/3: Deleting pod $pod_name..."
+    info "Step 1/4: Deleting pod $pod_name..."
     kubectl delete pod "$pod_name" -n "$ns" --force --grace-period=0 2>/dev/null || true
     
     # Wait for pod to be gone (max 10s)
@@ -355,15 +358,34 @@ fix_stuck_pvc_mount() {
     done
   fi
   
+  # Delete LINSTOR resource if we can find it
+  if [[ -n "$pv_name" ]] && [[ "$is_linstor_sc" -gt 0 ]]; then
+    info "Step 2/4: Cleaning up LINSTOR resource for PV $pv_name..."
+    local linstor_pod=$(kubectl get pods -n piraeus-datastore -l app.kubernetes.io/component=linstor-controller -o name 2>/dev/null | head -1)
+    if [[ -n "$linstor_pod" ]]; then
+      # Try to delete the LINSTOR resource
+      kubectl exec -n piraeus-datastore "$linstor_pod" -- linstor resource-definition delete "$pv_name" 2>/dev/null || true
+      info "  ✓ LINSTOR resource cleaned"
+    fi
+  else
+    info "Step 2/4: Skipping LINSTOR cleanup (PV not found or not LINSTOR)"
+  fi
+  
   # Now delete the PVC (force remove finalizers if stuck)
-  info "Step 2/3: Deleting PVC $pvc_name..."
+  info "Step 3/4: Deleting PVC $pvc_name..."
   kubectl patch pvc "$pvc_name" -n "$ns" -p '{"metadata":{"finalizers":null}}' --type=merge 2>/dev/null || true
   kubectl delete pvc "$pvc_name" -n "$ns" --force --grace-period=0 2>/dev/null || true
+  
+  # Delete PV too (force cleanup)
+  if [[ -n "$pv_name" ]]; then
+    kubectl patch pv "$pv_name" -p '{"metadata":{"finalizers":null}}' --type=merge 2>/dev/null || true
+    kubectl delete pv "$pv_name" --force --grace-period=0 2>/dev/null || true
+  fi
   
   # Wait a bit for cleanup
   sleep 3
   
-  info "Step 3/3: StatefulSet will recreate pod and PVC automatically"
+  info "Step 4/4: StatefulSet will recreate pod and PVC automatically"
   return 0
 }
 
