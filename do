@@ -510,9 +510,31 @@ wait_pods_ready() {
             local latest_event=$(kubectl get events -n "$ns" --field-selector involvedObject.name="$pod_name" --sort-by='.lastTimestamp' 2>/dev/null | tail -1 | awk '{$1=$2=$3=$4=""; print $0}' | sed 's/^ *//')
             if [[ -n "$latest_event" && "$latest_event" != *"LASTSEEN"* ]]; then
               local short_name=$(echo "$pod_name" | sed -E 's/-[a-z0-9]{8,10}-[a-z0-9]{5}$//; s/-[0-9]+$//')
-              # Truncate long messages
-              [[ ${#latest_event} -gt 60 ]] && latest_event="${latest_event:0:57}..."
+              # Don't truncate - show full message
               events_output+="      📋 $short_name: $latest_event\n"
+              
+              # For Pending pods with PVC issues, show detailed PVC status
+              if [[ "$pod_status" == "Pending" ]] && echo "$latest_event" | grep -q "persistentvolumeclaim"; then
+                local pvc_names=$(kubectl get pod "$pod_name" -n "$ns" -o jsonpath='{.spec.volumes[*].persistentVolumeClaim.claimName}' 2>/dev/null || true)
+                for pvc in $pvc_names; do
+                  if [[ -n "$pvc" ]]; then
+                    local pvc_status=$(kubectl get pvc "$pvc" -n "$ns" -o jsonpath='{.status.phase}' 2>/dev/null || echo "Unknown")
+                    local pvc_volume=$(kubectl get pvc "$pvc" -n "$ns" -o jsonpath='{.spec.volumeName}' 2>/dev/null || echo "")
+                    local pvc_capacity=$(kubectl get pvc "$pvc" -n "$ns" -o jsonpath='{.spec.resources.requests.storage}' 2>/dev/null || echo "")
+                    events_output+="        💾 PVC=$pvc Status=$pvc_status Volume=$pvc_volume Size=$pvc_capacity\n"
+                    
+                    # Show PVC conditions if not Bound
+                    if [[ "$pvc_status" != "Bound" ]]; then
+                      local pvc_conditions=$(kubectl get pvc "$pvc" -n "$ns" -o json 2>/dev/null | jq -r '.status.conditions[]? | "\(.type)=\(.status) (\(.reason): \(.message))"' | head -3)
+                      if [[ -n "$pvc_conditions" ]]; then
+                        while IFS= read -r cond; do
+                          events_output+="        ⚠️  Condition: $cond\n"
+                        done <<< "$pvc_conditions"
+                      fi
+                    fi
+                  fi
+                done
+              fi
             fi
           fi
         fi
