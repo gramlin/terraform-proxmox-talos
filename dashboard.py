@@ -1313,8 +1313,47 @@ class ClusterDashboard:
         except:
             return []
 
-    def render_checkpoints_row(self, checkpoints: List[Checkpoint]) -> Text:
+    def render_checkpoints_row(self, checkpoints: List[Checkpoint], step: Step = None) -> Text:
         text = Text()
+        
+        # Check if this step is actively running
+        is_step_active = False
+        if step:
+            dashboard_status = self._load_dashboard_status()
+            current_step = dashboard_status.get("current_step", "").lower()
+            step_status = dashboard_status.get("status", "")
+            
+            # Only active if status is "running" and step matches
+            if step_status == "running" and current_step:
+                step_name_lower = step.name.lower()
+                if "terraform" in current_step or "tf" in current_step:
+                    if step_name_lower in ["tfplan", "tfapply", "vms"]:
+                        is_step_active = True
+                elif "talos" in current_step or "bootstrap" in current_step or "kubeconfig" in current_step:
+                    if step_name_lower in ["talos_cfg", "talos_boot", "nodes"]:
+                        is_step_active = True
+                elif "storage" in current_step or "linstor" in current_step or "piraeus" in current_step or "satellite" in current_step or "pool" in current_step:
+                    if step_name_lower in ["piraeus", "linstor", "satellites", "storage", "sc"]:
+                        is_step_active = True
+                elif "cilium" in current_step:
+                    if step_name_lower == "cilium":
+                        is_step_active = True
+                elif "traefik" in current_step:
+                    if step_name_lower == "traefik":
+                        is_step_active = True
+                elif "cert" in current_step:
+                    if step_name_lower in ["certmgr", "ingress"]:
+                        is_step_active = True
+                elif "harbor" in current_step:
+                    if step_name_lower == "harbor":
+                        is_step_active = True
+                elif "gitea" in current_step:
+                    if step_name_lower == "gitea":
+                        is_step_active = True
+                elif "monitor" in current_step or "prometheus" in current_step or "grafana" in current_step:
+                    if step_name_lower == "monitoring":
+                        is_step_active = True
+        
         for i, cp in enumerate(checkpoints):
             if i > 0:
                 text.append(" ")
@@ -1329,10 +1368,15 @@ class ClusterDashboard:
                     icon = RADAR_FRAMES[(self.frame + i) % len(RADAR_FRAMES)]
                 text.append(icon, style="#0066AA bold")
             elif cp.status == Status.SUCCESS:
-                # Subtle pulse for completed items
-                phase = (self.frame + i * 3) % 8
-                brightness = "33FF33" if phase < 4 else "22DD22"
-                text.append("■", style=f"#{brightness}")
+                # Bright green if step is active, dark green if completed/inactive
+                if is_step_active:
+                    # Subtle pulse for active items
+                    phase = (self.frame + i * 3) % 8
+                    brightness = "33FF33" if phase < 4 else "22DD22"
+                    text.append("■", style=f"#{brightness}")
+                else:
+                    # Dark green for completed/inactive
+                    text.append("■", style="#006600")
             else:
                 icon, style = CHECKPOINT_STYLES.get(cp.status, ("○", "#666666"))
                 text.append(icon, style=style)
@@ -1426,7 +1470,7 @@ class ClusterDashboard:
         table.add_column("Status", width=14)
         for step in self.steps:
             status_style = "#008800" if step.status == Status.SUCCESS else "#CC0000" if step.status == Status.FAILED else "#0066AA" if step.status == Status.WAITING else "#666666"
-            table.add_row(self.render_step_icon(step), Text(step.description, style="#000000"), self.render_checkpoints_row(step.checkpoints), Text(step.message or "", style=status_style))
+            table.add_row(self.render_step_icon(step), Text(step.description, style="#000000"), self.render_checkpoints_row(step.checkpoints, step), Text(step.message or "", style=status_style))
         return table
 
     def render_checkpoint_details(self) -> Table:
