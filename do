@@ -289,6 +289,19 @@ progress_fail() { printf "\r\033[K  ✗ %s\n" "$*"; }
 fix_stuck_pvc_mount() {
   local ns="$1"
   local pvc_name="$2"
+  
+  # Check cooldown file to avoid re-fixing same PVC too quickly
+  local cooldown_file="/tmp/.pvc-fix-${ns}-${pvc_name}.lock"
+  if [[ -f "$cooldown_file" ]]; then
+    local last_fix=$(stat -f %m "$cooldown_file" 2>/dev/null || stat -c %Y "$cooldown_file" 2>/dev/null || echo "0")
+    local now=$(date +%s)
+    local elapsed=$((now - last_fix))
+    if [[ $elapsed -lt 30 ]]; then
+      # Don't retry within 30 seconds
+      return 1
+    fi
+  fi
+  
   local storage_class
   storage_class=$(kubectl get pvc "$pvc_name" -n "$ns" -o jsonpath='{.spec.storageClassName}' 2>/dev/null || echo "")
   
@@ -305,23 +318,38 @@ fix_stuck_pvc_mount() {
   else
     return 1
   fi
+  
+  # Mark as being fixed (cooldown)
+  touch "$cooldown_file"
+  
+  # Get the pod using this PVC
+  local pod_name=$(kubectl get pods -n "$ns" -o json 2>/dev/null | \
+    jq -r ".items[] | select(.spec.volumes[]?.persistentVolumeClaim?.claimName == \"$pvc_name\") | .metadata.name" | head -1)
+  
+  # IMPORTANT: Delete POD FIRST (so it releases the PVC)
+  if [[ -n "$pod_name" ]]; then
+    info "Step 1/3: Deleting pod $pod_name..."
+    kubectl delete pod "$pod_name" -n "$ns" --force --grace-period=0 2>/dev/null || true
     
-    # Get the pod using this PVC
-    local pod_name=$(kubectl get pods -n "$ns" -o json 2>/dev/null | \
-      jq -r ".items[] | select(.spec.volumes[]?.persistentVolumeClaim?.claimName == \"$pvc_name\") | .metadata.name" | head -1)
-    
-    # Delete PVC (force remove finalizers if stuck)
-    kubectl patch pvc "$pvc_name" -n "$ns" -p '{"metadata":{"finalizers":null}}' --type=merge 2>/dev/null || true
-    kubectl delete pvc "$pvc_name" -n "$ns" --wait=false 2>/dev/null || true
-    sleep 2
-    
-    # Delete the pod to trigger recreation
-    if [[ -n "$pod_name" ]]; then
-      warn "Deleting pod $pod_name to recreate PVC $pvc_name"
-      kubectl delete pod "$pod_name" -n "$ns" --wait=false 2>/dev/null || true
-    fi
-    
-  info "PVC $pvc_name deleted - will be recreated automatically"
+    # Wait for pod to be gone (max 10s)
+    for i in {1..10}; do
+      if ! kubectl get pod "$pod_name" -n "$ns" &>/dev/null; then
+        info "  ✓ Pod deleted"
+        break
+      fi
+      sleep 1
+    done
+  fi
+  
+  # Now delete the PVC (force remove finalizers if stuck)
+  info "Step 2/3: Deleting PVC $pvc_name..."
+  kubectl patch pvc "$pvc_name" -n "$ns" -p '{"metadata":{"finalizers":null}}' --type=merge 2>/dev/null || true
+  kubectl delete pvc "$pvc_name" -n "$ns" --force --grace-period=0 2>/dev/null || true
+  
+  # Wait a bit for cleanup
+  sleep 3
+  
+  info "Step 3/3: StatefulSet will recreate pod and PVC automatically"
   return 0
 }
 
