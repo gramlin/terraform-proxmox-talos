@@ -181,7 +181,8 @@ data "talos_machine_configuration" "controller" {
               name = "cilium"
               contents = join("---\n", [
                 data.helm_template.cilium.manifest,
-                "# Source cilium.tf\n${local.cilium_external_lb_manifest}",
+                # NOTE: CiliumL2AnnouncementPolicy and CiliumLoadBalancerIPPool are applied
+                # separately after Cilium CRDs are ready (see do script)
               ])
             },
             {
@@ -195,7 +196,8 @@ data "talos_machine_configuration" "controller" {
                   }
                 }),
                 data.helm_template.cert_manager.manifest,
-                "# Source cert-manager.tf\n${local.cert_manager_ingress_ca_manifest}",
+                # NOTE: ClusterIssuer and Certificate resources are applied separately
+                # after cert-manager CRDs are ready (see do script or apply manually)
               ])
             },
             {
@@ -206,24 +208,9 @@ data "talos_machine_configuration" "controller" {
               name     = "reloader"
               contents = data.helm_template.reloader.manifest
             },
-            {
-              name     = "gitea"
-              contents = local.gitea_manifest
-            },
-            {
-              name = "argocd"
-              contents = join("---\n", [
-                yamlencode({
-                  apiVersion = "v1"
-                  kind       = "Namespace"
-                  metadata = {
-                    name = local.argocd_namespace
-                  }
-                }),
-                data.helm_template.argocd.manifest,
-                "# Source argocd.tf\n${local.argocd_manifest}",
-              ])
-            },
+            # NOTE: gitea and argocd are deployed by the do script AFTER
+            # storage (LINSTOR) and cert-manager are fully ready.
+            # This prevents PVC creation before storage is available.
           ],
         },
     })],

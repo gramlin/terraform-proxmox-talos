@@ -1,44 +1,14 @@
 locals {
   traefik_namespace = "traefik"
   traefik_domain    = "traefik.${var.ingress_domain}"
+  # NOTE: Certificate resources are NOT included here because they require
+  # cert-manager webhook to be ready. Only include Namespace.
   traefik_manifests = [
     {
       apiVersion = "v1"
       kind       = "Namespace"
       metadata = {
         name = local.traefik_namespace
-      }
-    },
-    {
-      apiVersion = "cert-manager.io/v1"
-      kind       = "Certificate"
-      metadata = {
-        name      = "traefik-dashboard"
-        namespace = local.traefik_namespace
-      }
-      spec = {
-        subject = {
-          organizations = [
-            var.ingress_domain,
-          ]
-          organizationalUnits = [
-            "Kubernetes",
-          ]
-        }
-        commonName = "traefik-dashboard"
-        dnsNames = [
-          local.traefik_domain,
-        ]
-        privateKey = {
-          algorithm = "ECDSA"
-          size      = 256
-        }
-        duration   = "4320h"
-        secretName = "traefik-dashboard-tls"
-        issuerRef = {
-          kind = "ClusterIssuer"
-          name = "ingress"
-        }
       }
     },
   ]

@@ -2,45 +2,14 @@ locals {
   harbor_namespace = "harbor"
   harbor_domain    = "harbor.${var.ingress_domain}"
   harbor_notary_domain = "notary.${var.ingress_domain}"
+  # NOTE: Certificate resources are NOT included here because they require
+  # cert-manager webhook to be ready. Only include Namespace.
   harbor_manifests = [
     {
       apiVersion = "v1"
       kind       = "Namespace"
       metadata = {
         name = local.harbor_namespace
-      }
-    },
-    {
-      apiVersion = "cert-manager.io/v1"
-      kind       = "Certificate"
-      metadata = {
-        name      = "harbor"
-        namespace = local.harbor_namespace
-      }
-      spec = {
-        subject = {
-          organizations = [
-            var.ingress_domain,
-          ]
-          organizationalUnits = [
-            "Kubernetes",
-          ]
-        }
-        commonName = "harbor"
-        dnsNames = [
-          local.harbor_domain,
-          local.harbor_notary_domain,
-        ]
-        privateKey = {
-          algorithm = "ECDSA"
-          size      = 256
-        }
-        duration   = "4320h"
-        secretName = "harbor-tls"
-        issuerRef = {
-          kind = "ClusterIssuer"
-          name = "ingress"
-        }
       }
     },
   ]

@@ -38,6 +38,7 @@ load_config() {
   INSTALL_HARBOR="true"
   INSTALL_MONITORING="true"
   INSTALL_GITEA="true"
+  INSTALL_ARGOCD="false"
   INGRESS_DOMAIN="cure.dev"
   LB_IP_START=""
   LB_IP_END=""
@@ -97,6 +98,7 @@ load_config() {
   INSTALL_HARBOR=$(normalize_bool "$INSTALL_HARBOR")
   INSTALL_MONITORING=$(normalize_bool "$INSTALL_MONITORING")
   INSTALL_GITEA=$(normalize_bool "$INSTALL_GITEA")
+  INSTALL_ARGOCD=$(normalize_bool "$INSTALL_ARGOCD")
   WIPE_DISKS=$(normalize_bool "$WIPE_DISKS")
   AUTO_RESET_LINSTOR_DB=$(normalize_bool "$AUTO_RESET_LINSTOR_DB")
   LOG_ENABLED=$(normalize_bool "$LOG_ENABLED")
@@ -2387,6 +2389,153 @@ cmd_nuke_piraeus() {
 }
 
 # -----------------------------
+# Cilium LoadBalancer Policies (after CRDs are ready)
+# -----------------------------
+setup_cilium_lb_policies() {
+  step "setup Cilium LoadBalancer policies"
+  need kubectl
+  
+  # Wait for Cilium CRDs
+  info "Waiting for Cilium CRDs..."
+  local timeout=180 elapsed=0
+  while [[ $elapsed -lt $timeout ]]; do
+    if kubectl get crd ciliuml2announcementpolicies.cilium.io ciliumloadbalancerippools.cilium.io &>/dev/null; then
+      info "✓ Cilium CRDs ready"
+      break
+    fi
+    sleep 3
+    elapsed=$((elapsed + 3))
+  done
+  
+  if [[ $elapsed -ge $timeout ]]; then
+    warn "Cilium CRDs not ready after ${timeout}s - skipping LB policies"
+    return 0
+  fi
+  
+  # Create L2 announcement policy
+  info "Creating Cilium LB policies..."
+  kubectl apply -f - <<'EOF'
+apiVersion: cilium.io/v2alpha1
+kind: CiliumL2AnnouncementPolicy
+metadata:
+  name: external
+spec:
+  loadBalancerIPs: true
+  interfaces:
+    - eth0
+  nodeSelector:
+    matchExpressions:
+      - key: node-role.kubernetes.io/control-plane
+        operator: DoesNotExist
+EOF
+
+  # Create LoadBalancer IP pool
+  if [[ -n "$LB_IP_START" && -n "$LB_IP_END" ]]; then
+    kubectl apply -f - <<EOF
+apiVersion: cilium.io/v2alpha1
+kind: CiliumLoadBalancerIPPool
+metadata:
+  name: external
+spec:
+  blocks:
+    - start: ${LB_IP_START}
+      stop: ${LB_IP_END}
+EOF
+    info "✓ Cilium LB policies configured (IP range: $LB_IP_START - $LB_IP_END)"
+  else
+    info "✓ Cilium L2 announcement configured (no IP pool - using cluster defaults)"
+  fi
+}
+
+# -----------------------------
+# Cert-Manager Issuers (after CRDs are ready)
+# -----------------------------
+setup_cert_manager_issuers() {
+  step "setup cert-manager ClusterIssuers"
+  need kubectl
+  
+  # Wait for cert-manager CRDs
+  info "Waiting for cert-manager CRDs..."
+  local timeout=180 elapsed=0
+  while [[ $elapsed -lt $timeout ]]; do
+    if kubectl get crd certificates.cert-manager.io clusterissuers.cert-manager.io &>/dev/null; then
+      info "✓ cert-manager CRDs ready"
+      break
+    fi
+    sleep 3
+    elapsed=$((elapsed + 3))
+  done
+  
+  if [[ $elapsed -ge $timeout ]]; then
+    warn "cert-manager CRDs not ready after ${timeout}s"
+    return 1
+  fi
+  
+  # Wait for cert-manager pods
+  info "Waiting for cert-manager pods..."
+  kubectl -n cert-manager wait pod -l app.kubernetes.io/instance=cert-manager --for=condition=Ready --timeout=120s 2>/dev/null || true
+  
+  # Create selfsigned ClusterIssuer
+  info "Creating ClusterIssuers..."
+  kubectl apply -f - <<'EOF'
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: selfsigned
+spec:
+  selfSigned: {}
+EOF
+
+  # Wait for selfsigned to be ready
+  kubectl wait --for=condition=Ready clusterissuer/selfsigned --timeout=60s 2>/dev/null || true
+  
+  # Create CA certificate
+  kubectl apply -f - <<EOF
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: ingress
+  namespace: cert-manager
+spec:
+  isCA: true
+  subject:
+    organizations:
+      - ${INGRESS_DOMAIN}
+    organizationalUnits:
+      - Kubernetes
+  commonName: Kubernetes Ingress
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  duration: 4320h
+  secretName: ingress-tls
+  issuerRef:
+    name: selfsigned
+    kind: ClusterIssuer
+    group: cert-manager.io
+EOF
+
+  # Wait for CA certificate
+  kubectl -n cert-manager wait certificate/ingress --for=condition=Ready --timeout=120s 2>/dev/null || true
+  
+  # Create ingress ClusterIssuer (uses the CA cert)
+  kubectl apply -f - <<'EOF'
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: ingress
+spec:
+  ca:
+    secretName: ingress-tls
+EOF
+
+  # Wait for ingress issuer
+  kubectl wait --for=condition=Ready clusterissuer/ingress --timeout=60s 2>/dev/null || true
+  
+  info "✓ ClusterIssuers configured"
+}
+
+# -----------------------------
 # Traefik Ingress Controller
 # -----------------------------
 deploy_traefik() {
@@ -2395,7 +2544,32 @@ deploy_traefik() {
   need helm
 
   local ns="traefik"
+  local traefik_domain="traefik.${INGRESS_DOMAIN}"
   kubectl create namespace "$ns" --dry-run=client -o yaml | kubectl apply -f -
+
+  # Create TLS certificate if cert-manager available
+  if kubectl get clusterissuer ingress &>/dev/null; then
+    kubectl apply -f - <<EOF
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: traefik-dashboard-tls
+  namespace: $ns
+spec:
+  secretName: traefik-dashboard-tls
+  commonName: traefik-dashboard
+  dnsNames:
+    - $traefik_domain
+  issuerRef:
+    kind: ClusterIssuer
+    name: ingress
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  duration: 4320h
+EOF
+    kubectl wait --for=condition=Ready certificate/traefik-dashboard-tls -n "$ns" --timeout=60s || true
+  fi
 
   helm repo add traefik https://traefik.github.io/charts 2>/dev/null || true
   helm repo update traefik
@@ -2606,6 +2780,30 @@ deploy_gitea() {
   
   kubectl create namespace "$ns" --dry-run=client -o yaml | kubectl apply -f -
 
+  # Create TLS certificate if cert-manager available
+  if kubectl get clusterissuer ingress &>/dev/null; then
+    kubectl apply -f - <<EOF
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: gitea-tls
+  namespace: $ns
+spec:
+  secretName: gitea-tls
+  commonName: gitea
+  dnsNames:
+    - $gitea_domain
+  issuerRef:
+    kind: ClusterIssuer
+    name: ingress
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  duration: 4320h
+EOF
+    kubectl wait --for=condition=Ready certificate/gitea-tls -n "$ns" --timeout=60s || true
+  fi
+
   # Clean up orphaned secrets that block helm install
   for secret in gitea-inline-config gitea-init gitea; do
     if kubectl get secret "$secret" -n "$ns" &>/dev/null; then
@@ -2669,7 +2867,9 @@ deploy_gitea() {
     --set ingress.className=traefik \
     --set "ingress.hosts[0].host=$gitea_domain" \
     --set "ingress.hosts[0].paths[0].path=/" \
-    --set "ingress.hosts[0].paths[0].pathType=Prefix"
+    --set "ingress.hosts[0].paths[0].pathType=Prefix" \
+    --set "ingress.tls[0].secretName=gitea-tls" \
+    --set "ingress.tls[0].hosts[0]=$gitea_domain"
 
   # Wait for pods with progress (no timeout)
   wait_pods_ready "$ns"
@@ -2781,6 +2981,12 @@ post_apply_pipeline() {
   fi
 
   export_ingress_ca
+
+  # Setup Cilium LB policies (after CRDs are ready from Talos inline manifests)
+  setup_cilium_lb_policies
+  
+  # Setup cert-manager ClusterIssuers (after CRDs are ready from Talos inline manifests)
+  setup_cert_manager_issuers
 
   # Deploy ingress controller
   if [[ "$INGRESS_CONTROLLER" == "traefik" ]]; then

@@ -1,44 +1,14 @@
 locals {
   gitea_domain    = "gitea.${var.ingress_domain}"
   gitea_namespace = "gitea"
+  # NOTE: Certificate resources are NOT included here because they require
+  # cert-manager webhook to be ready. Only include Namespace.
   gitea_manifests = [
     {
       apiVersion = "v1"
       kind       = "Namespace"
       metadata = {
         name = local.gitea_namespace
-      }
-    },
-    {
-      apiVersion = "cert-manager.io/v1"
-      kind       = "Certificate"
-      metadata = {
-        name      = "gitea"
-        namespace = local.gitea_namespace
-      }
-      spec = {
-        subject = {
-          organizations = [
-            var.ingress_domain,
-          ]
-          organizationalUnits = [
-            "Kubernetes",
-          ]
-        }
-        commonName = "gitea"
-        dnsNames = [
-          local.gitea_domain,
-        ]
-        privateKey = {
-          algorithm = "ECDSA" # NB Ed25519 is not yet supported by chrome 93 or firefox 91.
-          size      = 256
-        }
-        duration   = "4320h" # NB 4320h (180 days). default is 2160h (90 days).
-        secretName = "gitea-tls"
-        issuerRef = {
-          kind = "ClusterIssuer"
-          name = "ingress"
-        }
       }
     },
   ]

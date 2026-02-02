@@ -1,47 +1,10 @@
 locals {
   argocd_domain    = "argocd.${var.ingress_domain}"
   argocd_namespace = "argocd"
-  argocd_manifests = [
-    # create the argocd-server tls secret.
-    # NB argocd-server will automatically reload this secret.
-    # NB alternatively we could set the server.certificate.enabled helm value. but
-    #    that does not allow us to fully customize the certificate (e.g. subject).
-    # see https://github.com/argoproj/argo-helm/blob/argo-cd-9.3.4/charts/argo-cd/templates/argocd-server/certificate.yaml
-    # see https://argo-cd.readthedocs.io/en/stable/operator-manual/tls/
-    # see https://cert-manager.io/docs/reference/api-docs/#cert-manager.io/v1.Certificate
-    {
-      apiVersion = "cert-manager.io/v1"
-      kind       = "Certificate"
-      metadata = {
-        name      = "argocd-server"
-        namespace = local.argocd_namespace
-      }
-      spec = {
-        subject = {
-          organizations = [
-            var.ingress_domain,
-          ]
-          organizationalUnits = [
-            "Kubernetes",
-          ]
-        }
-        commonName = "Argo CD Server"
-        dnsNames = [
-          local.argocd_domain,
-        ]
-        privateKey = {
-          algorithm = "ECDSA" # NB Ed25519 is not yet supported by chrome 93 or firefox 91.
-          size      = 256
-        }
-        duration   = "4320h" # NB 4320h (180 days). default is 2160h (90 days).
-        secretName = "argocd-server-tls"
-        issuerRef = {
-          kind = "ClusterIssuer"
-          name = "ingress"
-        }
-      }
-    },
-  ]
+  # NOTE: Certificate resources are NOT included in inline manifests because
+  # they require cert-manager webhook to be ready. They are created by the
+  # do script after cert-manager is fully running.
+  argocd_manifests = []
   argocd_manifest = join("---\n", [for d in local.argocd_manifests : yamlencode(d)])
 }
 
