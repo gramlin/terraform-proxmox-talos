@@ -1221,22 +1221,35 @@ test_linstor_nodes_registered() {
     return 1
   fi
   
-  local registered_nodes
-  registered_nodes=$(kubectl -n piraeus-datastore exec "$controller_pod" -- linstor node list 2>/dev/null | grep -c "SATELLITE" || echo "0")
-  registered_nodes=$(echo "$registered_nodes" | tr -d ' \n')
-  
   local expected_nodes=${#WORKER_NODE_NAMES[@]}
   if [[ $expected_nodes -eq 0 ]]; then
     expected_nodes=$(kubectl get pods -n piraeus-datastore -l app.kubernetes.io/component=linstor-satellite --no-headers 2>/dev/null | wc -l | tr -d ' \n')
   fi
-  
-  if [[ $registered_nodes -gt 0 ]] && [[ $registered_nodes -eq $expected_nodes ]]; then
-    info "  ✓ All $registered_nodes nodes registered"
-    return 0
-  else
-    warn "  ⚠ $registered_nodes nodes registered (expected $expected_nodes)"
-    return 1
-  fi
+
+  local start_ts
+  start_ts=$(date +%s)
+  local timeout=300
+  local registered_nodes="0"
+
+  while true; do
+    registered_nodes=$(kubectl -n piraeus-datastore exec "$controller_pod" -- linstor node list 2>/dev/null | grep -c "SATELLITE" || echo "0")
+    registered_nodes=$(echo "$registered_nodes" | tr -d ' \n')
+
+    if [[ $registered_nodes -gt 0 ]] && [[ $registered_nodes -eq $expected_nodes ]]; then
+      info "  ✓ All $registered_nodes nodes registered"
+      return 0
+    fi
+
+    local now_ts
+    now_ts=$(date +%s)
+    if (( now_ts - start_ts >= timeout )); then
+      warn "  ⚠ $registered_nodes nodes registered (expected $expected_nodes)"
+      return 1
+    fi
+
+    info "  … waiting for LINSTOR nodes ($registered_nodes/$expected_nodes)"
+    sleep 10
+  done
 }
 
 test_storage_pools_created() {
@@ -2790,6 +2803,10 @@ post_apply_pipeline() {
   fi
 
   # Deploy additional components
+  if [[ "$INSTALL_GITEA" == "1" ]]; then
+    deploy_gitea
+  fi
+
   if [[ "$INSTALL_HARBOR" == "1" ]]; then
     deploy_harbor
   fi
@@ -2798,16 +2815,12 @@ post_apply_pipeline() {
     deploy_monitoring
   fi
 
-  if [[ "$INSTALL_GITEA" == "1" ]]; then
-    deploy_gitea
-  fi
-
   step "cluster nodes"
   kubectl get nodes -o wide || true
 
   if [[ "$INSTALL_PIRAEUS" == "1" ]]; then
     step "Test summary"
-    run_all_tests
+    run_all_tests || warn "Test summary finished with failures"
   fi
 
   print_access_info

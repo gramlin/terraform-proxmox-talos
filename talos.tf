@@ -206,10 +206,8 @@ data "talos_machine_configuration" "controller" {
               name     = "reloader"
               contents = data.helm_template.reloader.manifest
             },
-            {
-              name     = "gitea"
-              contents = local.gitea_manifest
-            },
+            # NOTE: gitea is deployed by the do script AFTER LINSTOR storage is ready
+            # to prevent PVC creation failures
             {
               name = "argocd"
               contents = join("---\n", [
