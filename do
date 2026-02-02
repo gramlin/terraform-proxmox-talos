@@ -2,18 +2,20 @@
 # do - Talos+Proxmox Terraform helper + Piraeus/LINSTOR bootstrap
 #
 # Commands:
-#   plan           Terraform plan only (writes tfplan)
-#   apply          Full deployment (terraform + bootstrap + components)
-#   plan-apply     Terraform plan + apply + bootstrap
-#   destroy        Terraform destroy only
-#   reset-piraeus  Uninstall Piraeus/LINSTOR from current cluster
-#   reset-all      reset-piraeus + terraform destroy + cleanup
-#   fix-linstor-db Fix LINSTOR DB migration errors
-#   nuke-piraeus   Complete removal of Piraeus namespace and CRDs
-#   install-tools  Install all required CLI tools
-#   deploy-<comp>  Deploy individual component (traefik, harbor, monitoring, gitea)
-#   info           Show cluster access information
-#   test           Run validation tests
+#   plan              Terraform plan only (writes tfplan)
+#   apply             Full deployment (terraform + bootstrap + components)
+#   plan-apply        Terraform plan + apply + bootstrap
+#   destroy           Terraform destroy only
+#   reset-piraeus     Uninstall Piraeus/LINSTOR from current cluster
+#   reset-all         reset-piraeus + terraform destroy + cleanup
+#   fix-linstor-db    Fix LINSTOR DB migration errors
+#   restart-linstor   Restart LINSTOR satellites (recreate DRBD devices)
+#   clean-pvc-fixes   Reset PVC fix attempt tracking (retry failed PVCs)
+#   nuke-piraeus      Complete removal of Piraeus namespace and CRDs
+#   install-tools     Install all required CLI tools
+#   deploy-<comp>     Deploy individual component (traefik, harbor, monitoring, gitea)
+#   info              Show cluster access information
+#   test              Run validation tests
 #
 # Configuration:
 #   Edit do.cfg for cluster settings
@@ -304,6 +306,22 @@ fix_stuck_pvc_mount() {
   local ns="$1"
   local pvc_name="$2"
   
+  # Track attempt count to prevent infinite loops
+  local attempt_file="/tmp/.pvc-fix-attempts-${ns}-${pvc_name}"
+  local attempt_count=0
+  if [[ -f "$attempt_file" ]]; then
+    attempt_count=$(cat "$attempt_file" 2>/dev/null || echo "0")
+  fi
+  attempt_count=$((attempt_count + 1))
+  echo "$attempt_count" > "$attempt_file"
+  
+  # Give up after 3 attempts - something is fundamentally wrong
+  if [[ $attempt_count -gt 3 ]]; then
+    warn "❌ Gave up on fixing $pvc_name after 3 attempts - LINSTOR resource may be corrupted"
+    warn "   Consider running: ./do reset-piraeus  OR  ./do nuke-piraeus"
+    return 1
+  fi
+  
   # Check cooldown file to avoid re-fixing same PVC too quickly
   local cooldown_file="/tmp/.pvc-fix-${ns}-${pvc_name}.lock"
   if [[ -f "$cooldown_file" ]]; then
@@ -326,9 +344,9 @@ fix_stuck_pvc_mount() {
   is_linstor_sc=$(echo "$storage_class" | grep -c "linstor" || true)
 
   if echo "$events" | grep -qE "Bad magic number|superblock.*corrupt|failed to run fsck"; then
-    warn "Detected LINSTOR format bug for PVC $pvc_name (sc=$storage_class) - recreating..."
+    warn "Detected LINSTOR format bug for PVC $pvc_name (attempt $attempt_count/3) - recreating..."
   elif [[ "$is_linstor_sc" -gt 0 ]] && echo "$events" | grep -qE "MountVolume.SetUp failed"; then
-    warn "Detected LINSTOR mount failure for PVC $pvc_name (sc=$storage_class) - recreating..."
+    warn "Detected LINSTOR mount failure for PVC $pvc_name (attempt $attempt_count/3) - recreating..."
   else
     return 1
   fi
@@ -345,7 +363,7 @@ fix_stuck_pvc_mount() {
   
   # IMPORTANT: Delete POD FIRST (so it releases the PVC)
   if [[ -n "$pod_name" ]]; then
-    info "Step 1/4: Deleting pod $pod_name..."
+    info "Step 1/5: Deleting pod $pod_name..."
     kubectl delete pod "$pod_name" -n "$ns" --force --grace-period=0 2>/dev/null || true
     
     # Wait for pod to be gone (max 10s)
@@ -358,26 +376,36 @@ fix_stuck_pvc_mount() {
     done
   fi
   
-  # Delete LINSTOR resource if we can find it
+  # Delete LINSTOR resource - MORE AGGRESSIVELY
   if [[ -n "$pv_name" ]] && [[ "$is_linstor_sc" -gt 0 ]]; then
-    info "Step 2/4: Cleaning up LINSTOR resource for PV $pv_name..."
+    info "Step 2/5: Force-removing LINSTOR resource for PV $pv_name..."
     local linstor_pod=$(kubectl get pods -n piraeus-datastore -l app.kubernetes.io/component=linstor-controller -o name 2>/dev/null | head -1)
     if [[ -n "$linstor_pod" ]]; then
-      # Try to delete the LINSTOR resource
-      kubectl exec -n piraeus-datastore "$linstor_pod" -- linstor resource-definition delete "$pv_name" 2>/dev/null || true
+      # Try multiple ways to delete
+      kubectl exec -n piraeus-datastore "$linstor_pod" -- linstor resource-definition delete --force "$pv_name" 2>/dev/null || true
+      kubectl exec -n piraeus-datastore "$linstor_pod" -- linstor resource delete --force "$pv_name" "*" 2>/dev/null || true
+      
+      # Verify it's gone
+      local still_exists=$(kubectl exec -n piraeus-datastore "$linstor_pod" -- linstor resource-definition list 2>/dev/null | grep -c "$pv_name" || echo "0")
+      if [[ $still_exists -gt 0 ]]; then
+        warn "  ⚠ LINSTOR resource still exists - trying harder..."
+        # Delete all resources on all nodes for this PV
+        kubectl exec -n piraeus-datastore "$linstor_pod" -- linstor resource delete --force "$pv_name" --all 2>/dev/null || true
+      fi
       info "  ✓ LINSTOR resource cleaned"
     fi
   else
-    info "Step 2/4: Skipping LINSTOR cleanup (PV not found or not LINSTOR)"
+    info "Step 2/5: Skipping LINSTOR cleanup (PV not found or not LINSTOR)"
   fi
   
   # Now delete the PVC (force remove finalizers if stuck)
-  info "Step 3/4: Deleting PVC $pvc_name..."
+  info "Step 3/5: Deleting PVC $pvc_name..."
   kubectl patch pvc "$pvc_name" -n "$ns" -p '{"metadata":{"finalizers":null}}' --type=merge 2>/dev/null || true
   kubectl delete pvc "$pvc_name" -n "$ns" --force --grace-period=0 2>/dev/null || true
   
   # Delete PV too (force cleanup)
   if [[ -n "$pv_name" ]]; then
+    info "Step 4/5: Deleting PV $pv_name..."
     kubectl patch pv "$pv_name" -p '{"metadata":{"finalizers":null}}' --type=merge 2>/dev/null || true
     kubectl delete pv "$pv_name" --force --grace-period=0 2>/dev/null || true
   fi
@@ -385,7 +413,7 @@ fix_stuck_pvc_mount() {
   # Wait a bit for cleanup
   sleep 3
   
-  info "Step 4/4: StatefulSet will recreate pod and PVC automatically"
+  info "Step 5/5: StatefulSet will recreate pod and PVC automatically"
   return 0
 }
 
@@ -549,17 +577,46 @@ wait_pods_ready() {
             grep -E "FailedMount|MountVolume.SetUp failed|failed to run fsck|Bad magic number" || true)
           
           if [[ -n "$mount_events" ]]; then
-            warn "🔧 Fixing mount failure for pod $pod_name (${elapsed}s elapsed)"
-            # Get PVCs used by this pod
+            # Get PVCs used by this pod to check if any are permanently broken
             local pvc_names=$(kubectl get pod "$pod_name" -n "$ns" -o jsonpath='{.spec.volumes[*].persistentVolumeClaim.claimName}' 2>/dev/null || true)
+            local all_pvcs_broken=true
+            local has_broken_pvcs=false
+            
             for pvc_claim in $pvc_names; do
               if [[ -n "$pvc_claim" ]]; then
-                info "  → Recreating PVC: $pvc_claim"
-                fix_stuck_pvc_mount "$ns" "$pvc_claim" || true
+                # Check if this PVC has failed 3+ times
+                local attempts_file="/tmp/.pvc-fix-attempts-${ns}-${pvc_claim}"
+                local attempts=0
+                if [[ -f "$attempts_file" ]]; then
+                  attempts=$(cat "$attempts_file" 2>/dev/null || echo "0")
+                fi
+                
+                if [[ $attempts -ge 3 ]]; then
+                  has_broken_pvcs=true
+                else
+                  all_pvcs_broken=false
+                fi
               fi
             done
-            # Small delay to let cleanup happen
-            sleep 3
+            
+            if [[ "$has_broken_pvcs" == true ]]; then
+              warn "⚠️  PVC corruption detected and fix attempts exhausted"
+              if [[ "$ns" == "monitoring" ]]; then
+                warn "💡 SUGGESTION: Set INSTALL_MONITORING=false in do.cfg to skip Prometheus deployment"
+              fi
+            fi
+            
+            if [[ "$all_pvcs_broken" != true ]]; then
+              warn "🔧 Fixing mount failure for pod $pod_name (${elapsed}s elapsed)"
+              for pvc_claim in $pvc_names; do
+                if [[ -n "$pvc_claim" ]]; then
+                  info "  → Recreating PVC: $pvc_claim"
+                  fix_stuck_pvc_mount "$ns" "$pvc_claim" || true
+                fi
+              done
+              # Small delay to let cleanup happen
+              sleep 3
+            fi
           fi
         done <<< "$pod_data"
       fi
@@ -2657,6 +2714,51 @@ REPORT_EOF
   cat "$report_file"
 }
 
+cmd_restart_linstor() {
+  need kubectl
+  ensure_kubeconfig || die "No kubeconfig found"
+
+  step "Restart LINSTOR satellites (force DRBD device recreation)"
+  
+  # Get list of satellite pods
+  local satellite_pods=$(kubectl get pods -n piraeus-datastore -l app.kubernetes.io/component=linstor-satellite -o name 2>/dev/null || true)
+  
+  if [[ -z "$satellite_pods" ]]; then
+    warn "No LINSTOR satellite pods found"
+    return 1
+  fi
+  
+  # Delete each satellite pod (forces recreation)
+  echo "$satellite_pods" | while read -r pod; do
+    info "Restarting: $pod"
+    kubectl delete "$pod" -n piraeus-datastore --grace-period=30 2>/dev/null || true
+  done
+  
+  # Wait for them to come back
+  info "Waiting for satellites to restart..."
+  kubectl rollout restart daemonset/linstor-satellite -n piraeus-datastore 2>/dev/null || true
+  
+  sleep 10
+  
+  # Show status
+  kubectl get pods -n piraeus-datastore -l app.kubernetes.io/component=linstor-satellite
+  
+  info "LINSTOR satellites restarted. DRBD devices will be recreated."
+}
+
+cmd_clean_pvc_fixes() {
+  step "Clean up PVC fix attempt tracking files"
+  
+  local count=$(ls -1 /tmp/.pvc-fix-attempts-* 2>/dev/null | wc -l)
+  info "Found $count PVC fix attempt files"
+  
+  rm -f /tmp/.pvc-fix-attempts-* 2>/dev/null || true
+  rm -f /tmp/.pvc-fix-*.lock 2>/dev/null || true
+  
+  info "✓ Cleaned up PVC fix tracking"
+  info "You can now retry: ./do deploy-monitoring"
+}
+
 cmd_nuke_piraeus() {
   need kubectl
   ensure_kubeconfig || die "No kubeconfig found"
@@ -3629,6 +3731,8 @@ main() {
     reset-piraeus)     cmd_reset_piraeus ;;
     reset-all)         cmd_reset_all ;;
     fix-linstor-db)    cmd_fix_linstor_db ;;
+    restart-linstor)   cmd_restart_linstor ;;
+    clean-pvc-fixes)   cmd_clean_pvc_fixes ;;
     nuke-piraeus)      cmd_nuke_piraeus ;;
     install-tools)     cmd_install_tools ;;
     deploy-traefik)    ensure_kubeconfig && deploy_traefik ;;
