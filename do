@@ -2420,6 +2420,146 @@ cmd_fix_linstor_db() {
   info "  kubectl get pods -n piraeus-datastore -l app.kubernetes.io/component=linstor-controller -w"
 }
 
+# Generate deployment summary report
+generate_report() {
+  step "Generate deployment summary report"
+  
+  load_cluster_vars 2>/dev/null || true
+  ensure_kubeconfig || die "No kubeconfig found"
+  
+  local report_file="$WORKDIR/DEPLOYMENT_REPORT.md"
+  local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+  
+  info "Generating report to: $report_file"
+  
+  cat > "$report_file" <<'REPORT_EOF'
+# Talos Cluster Deployment Report
+
+REPORT_EOF
+
+  echo "**Generated:** $timestamp" >> "$report_file"
+  echo "" >> "$report_file"
+  
+  # Cluster Info
+  echo "## Cluster Information" >> "$report_file"
+  echo "" >> "$report_file"
+  echo "- **Name:** $CLUSTER_NAME" >> "$report_file"
+  echo "- **Endpoint:** $CLUSTER_ENDPOINT" >> "$report_file"
+  echo "- **Domain:** $INGRESS_DOMAIN" >> "$report_file"
+  echo "- **Kubernetes Version:** $(kubectl version -o json 2>/dev/null | jq -r '.serverVersion.gitVersion' || echo 'N/A')" >> "$report_file"
+  echo "" >> "$report_file"
+  
+  # Proxmox Resources
+  echo "## Proxmox Virtual Machines" >> "$report_file"
+  echo "" >> "$report_file"
+  echo "| Name | Role | IP Address | vCPU | RAM | Status |" >> "$report_file"
+  echo "|------|------|------------|------|-----|--------|" >> "$report_file"
+  
+  kubectl get nodes -o json 2>/dev/null | jq -r '.items[] | 
+    "\(.metadata.name) | \(if (.metadata.labels."node-role.kubernetes.io/control-plane") then "Control Plane" else "Worker" end) | \(.status.addresses[] | select(.type=="InternalIP") | .address) | \(.status.allocatable.cpu) | \(.status.allocatable.memory) | \(.status.conditions[] | select(.type=="Ready") | .status)"' | 
+    while IFS='|' read name role ip cpu mem status; do
+      echo "| $name | $role | $ip | $cpu | $mem | $status |" >> "$report_file"
+    done
+  echo "" >> "$report_file"
+  
+  # Storage Info
+  echo "## Storage (LINSTOR)" >> "$report_file"
+  echo "" >> "$report_file"
+  
+  local satellites=$(kubectl get pods -n piraeus-datastore -l app.kubernetes.io/component=linstor-satellite --no-headers 2>/dev/null | wc -l)
+  local pools=$(kubectl get storageclass -o json 2>/dev/null | jq -r '.items[] | select(.provisioner=="linstor.csi.linbit.com") | .metadata.name' | wc -l)
+  
+  echo "- **Satellites:** $satellites" >> "$report_file"
+  echo "- **Storage Classes:** $pools" >> "$report_file"
+  echo "" >> "$report_file"
+  
+  local pvc_count=$(kubectl get pvc --all-namespaces --no-headers 2>/dev/null | wc -l)
+  local pvc_size=$(kubectl get pvc --all-namespaces -o json 2>/dev/null | jq -r '.items[] | .spec.resources.requests.storage' | grep -oE '^[0-9]+' | awk '{s+=$1} END {printf "%.0f", s/1024/1024}')
+  
+  echo "**PVC Usage:**" >> "$report_file"
+  echo "- **Total PVCs:** $pvc_count" >> "$report_file"
+  echo "- **Total Capacity:** ~${pvc_size}Gi" >> "$report_file"
+  echo "" >> "$report_file"
+  
+  # Deployed Components
+  echo "## Deployed Components" >> "$report_file"
+  echo "" >> "$report_file"
+  
+  # Traefik
+  if kubectl get ns traefik &>/dev/null 2>&1; then
+    local traefik_pods=$(kubectl get pods -n traefik --no-headers 2>/dev/null | wc -l)
+    local traefik_lb=$(kubectl get svc -n traefik traefik -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "pending")
+    echo "### Traefik" >> "$report_file"
+    echo "- **Status:** Deployed" >> "$report_file"
+    echo "- **Pods:** $traefik_pods" >> "$report_file"
+    echo "- **LoadBalancer IP:** $traefik_lb" >> "$report_file"
+    echo "" >> "$report_file"
+  fi
+  
+  # Harbor
+  if kubectl get ns harbor &>/dev/null 2>&1; then
+    local harbor_pods=$(kubectl get pods -n harbor --no-headers 2>/dev/null | wc -l)
+    echo "### Harbor Registry" >> "$report_file"
+    echo "- **Status:** Deployed" >> "$report_file"
+    echo "- **Pods:** $harbor_pods" >> "$report_file"
+    echo "- **URL:** https://harbor.$INGRESS_DOMAIN" >> "$report_file"
+    echo "" >> "$report_file"
+  fi
+  
+  # Monitoring
+  if kubectl get ns monitoring &>/dev/null 2>&1; then
+    local mon_pods=$(kubectl get pods -n monitoring --no-headers 2>/dev/null | wc -l)
+    echo "### Monitoring (Prometheus + Grafana)" >> "$report_file"
+    echo "- **Status:** Deployed" >> "$report_file"
+    echo "- **Pods:** $mon_pods" >> "$report_file"
+    echo "- **Grafana URL:** https://grafana.$INGRESS_DOMAIN" >> "$report_file"
+    echo "" >> "$report_file"
+  fi
+  
+  # Gitea
+  if kubectl get ns gitea &>/dev/null 2>&1; then
+    local gitea_pods=$(kubectl get pods -n gitea --no-headers 2>/dev/null | wc -l)
+    echo "### Gitea" >> "$report_file"
+    echo "- **Status:** Deployed" >> "$report_file"
+    echo "- **Pods:** $gitea_pods" >> "$report_file"
+    echo "- **URL:** https://gitea.$INGRESS_DOMAIN" >> "$report_file"
+    echo "" >> "$report_file"
+  fi
+  
+  # Node Resource Usage
+  echo "## Resource Usage Summary" >> "$report_file"
+  echo "" >> "$report_file"
+  
+  echo "| Node | CPU Requests | Memory Requests |" >> "$report_file"
+  echo "|------|--------------|-----------------|" >> "$report_file"
+  
+  kubectl get nodes -o json 2>/dev/null | jq -r '.items[] | .metadata.name' | while read node; do
+    local cpu_req=$(kubectl describe node "$node" 2>/dev/null | grep "Allocated resources" -A 10 | grep "cpu" | awk '{print $2}' | sed 's/m$//')
+    local mem_req=$(kubectl describe node "$node" 2>/dev/null | grep "Allocated resources" -A 10 | grep "memory" | awk '{print $2}' | sed 's/Mi$//')
+    echo "| $node | ${cpu_req:-0}m | ${mem_req:-0}Mi |" >> "$report_file"
+  done
+  
+  echo "" >> "$report_file"
+  
+  # Configuration
+  echo "## Configuration" >> "$report_file"
+  echo "" >> "$report_file"
+  echo "| Setting | Value |" >> "$report_file"
+  echo "|---------|-------|" >> "$report_file"
+  echo "| Profile | $PROFILE |" >> "$report_file"
+  echo "| Ingress Controller | $INGRESS_CONTROLLER |" >> "$report_file"
+  echo "| Storage Class | $STORAGE_CLASS_NAME |" >> "$report_file"
+  echo "| Storage Replicas | $STORAGE_REPLICAS |" >> "$report_file"
+  echo "| Traefik | $([ "$INSTALL_HARBOR" = "1" ] && echo "Yes" || echo "No") |" >> "$report_file"
+  echo "| Harbor | $([ "$INSTALL_HARBOR" = "1" ] && echo "Yes" || echo "No") |" >> "$report_file"
+  echo "| Monitoring | $([ "$INSTALL_MONITORING" = "1" ] && echo "Yes" || echo "No") |" >> "$report_file"
+  echo "| Gitea | $([ "$INSTALL_GITEA" = "1" ] && echo "Yes" || echo "No") |" >> "$report_file"
+  echo "" >> "$report_file"
+  
+  info "✓ Report generated: $report_file"
+  cat "$report_file"
+}
+
 cmd_nuke_piraeus() {
   need kubectl
   ensure_kubeconfig || die "No kubeconfig found"
@@ -3097,6 +3237,7 @@ Commands:
   deploy-harbor     Deploy Harbor only
   deploy-monitoring Deploy Prometheus + Grafana
   deploy-gitea      Deploy Gitea
+  report            Generate deployment summary report (.md)
   
   config            Show current configuration
   info              Show cluster access info
@@ -3158,6 +3299,7 @@ main() {
     deploy-harbor)     ensure_kubeconfig && deploy_harbor ;;
     deploy-monitoring) ensure_kubeconfig && deploy_monitoring ;;
     deploy-gitea)      ensure_kubeconfig && deploy_gitea ;;
+    report)            generate_report ;;
     config)            show_config ;;
     info)              ensure_kubeconfig && print_access_info ;;
     test|tests)        ensure_kubeconfig && load_cluster_vars && run_all_tests ;;
