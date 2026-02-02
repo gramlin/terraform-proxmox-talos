@@ -3518,6 +3518,13 @@ cmd_apply() {
   rm -f "$WORKDIR"/.talos-status.json
   rm -f "$WORKDIR"/.linstor-status.json
   rm -f "$WORKDIR"/.proxmox-status.json
+  rm -f "$WORKDIR"/.test-results.json
+  rm -f "$WORKDIR"/.cluster-health.json
+  rm -f "$WORKDIR"/.prometheus-status.json
+  
+  # Clear PVC fix attempt tracking
+  rm -f /tmp/.pvc-fix-attempts-* 2>/dev/null || true
+  rm -f /tmp/.pvc-fix-*.lock 2>/dev/null || true
   
   # Initialize fresh dashboard state
   update_dashboard_step "initializing" "idle"
