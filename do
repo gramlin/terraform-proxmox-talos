@@ -456,20 +456,20 @@ wait_pods_ready() {
       printf "    ⏳ Creating: %s\n" "$(IFS=', '; echo "${creating_pods[*]}")"
       activity_shown=true
       
-      # Check for LINSTOR mount failures after 2 minutes of ContainerCreating
-      if [[ $elapsed -gt 120 ]]; then
+      # Check for LINSTOR mount failures after 60 seconds of ContainerCreating
+      if [[ $elapsed -gt 60 ]]; then
         for pod_name in $(echo "$pod_data" | grep "ContainerCreating" | awk '{print $1}'); do
-          local mount_events=$(kubectl describe pod "$pod_name" -n "$ns" 2>/dev/null | grep -E "FailedMount.*Bad magic number|FailedMount.*superblock")
+          # Look for any mount-related failures
+          local mount_events=$(kubectl describe pod "$pod_name" -n "$ns" 2>/dev/null | grep -E "FailedMount|MountVolume.SetUp failed" || true)
           if [[ -n "$mount_events" ]]; then
-            # Extract PVC name from mount error
-            local stuck_pvc=$(echo "$mount_events" | grep -oE 'pvc-[a-f0-9-]+' | head -1)
-            if [[ -n "$stuck_pvc" ]]; then
-              # Find the PVC name (not the PV name)
-              local pvc_claim=$(kubectl get pvc -n "$ns" --no-headers 2>/dev/null | grep "$stuck_pvc" | awk '{print $1}')
+            info "Attempting to fix mount failures for pod $pod_name"
+            # Try to find and fix all PVCs used by this pod
+            local pvc_names=$(kubectl get pod "$pod_name" -n "$ns" -o jsonpath='{.spec.volumes[*].persistentVolumeClaim.claimName}' 2>/dev/null || true)
+            for pvc_claim in $pvc_names; do
               if [[ -n "$pvc_claim" ]]; then
-                fix_stuck_pvc_mount "$ns" "$pvc_claim"
+                fix_stuck_pvc_mount "$ns" "$pvc_claim" || true
               fi
-            fi
+            done
           fi
         done
       fi
