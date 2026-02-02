@@ -461,13 +461,13 @@ wait_pods_ready() {
       printf "    ⏳ Creating: %s\n" "$(IFS=', '; echo "${creating_pods[*]}")"
       activity_shown=true
       
-      # Check for LINSTOR mount failures after 60 seconds of ContainerCreating
+      # Check for LINSTOR mount failures after 60 seconds of ContainerCreating or Pending
       if [[ $elapsed -gt 60 ]]; then
-        for pod_name in $(echo "$pod_data" | grep "ContainerCreating" | awk '{print $1}'); do
-          # Look for any mount-related failures
-          local mount_events=$(kubectl describe pod "$pod_name" -n "$ns" 2>/dev/null | grep -E "FailedMount|MountVolume.SetUp failed" || true)
+        for pod_name in $(echo "$pod_data" | grep -E "ContainerCreating|Pending" | awk '{print $1}'); do
+          # Look for any mount-related failures (fsck, mount errors)
+          local mount_events=$(kubectl describe pod "$pod_name" -n "$ns" 2>/dev/null | grep -E "FailedMount|MountVolume.SetUp failed|failed to run fsck|Bad magic number" || true)
           if [[ -n "$mount_events" ]]; then
-            info "Attempting to fix mount failures for pod $pod_name"
+            warn "Detected mount failure for pod $pod_name - recreating PVCs..."
             # Try to find and fix all PVCs used by this pod
             local pvc_names=$(kubectl get pod "$pod_name" -n "$ns" -o jsonpath='{.spec.volumes[*].persistentVolumeClaim.claimName}' 2>/dev/null || true)
             for pvc_claim in $pvc_names; do
@@ -2231,6 +2231,14 @@ configure_linstor_storage_pools() {
 
   for i in "${!WORKER_NODE_NAMES[@]}"; do
     local node="${WORKER_NODE_NAMES[$i]}"
+    
+    # Check if storage pool already exists
+    if kubectl -n piraeus-datastore exec "$linstor_pod" -- linstor storage-pool list -p 2>/dev/null | \
+       grep -q "^${node}|${POOL_NAME}|"; then
+      info "✓ Storage pool '${POOL_NAME}' already exists on $node"
+      continue
+    fi
+    
     info "Creating storage pool on $node..."
     kubectl -n piraeus-datastore exec "$linstor_pod" -- linstor \
       storage-pool create lvmthin "$node" "${POOL_NAME}" "linstor-vg/${POOL_NAME}" 2>&1 || true
