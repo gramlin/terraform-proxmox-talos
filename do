@@ -2430,6 +2430,10 @@ generate_report() {
   local report_file="$WORKDIR/DEPLOYMENT_REPORT.md"
   local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
   
+  # Set defaults for optional variables
+  CLUSTER_NAME="${CLUSTER_NAME:-talos-proxmox}"
+  CLUSTER_ENDPOINT="${CLUSTER_ENDPOINT:-$(kubectl config view -o jsonpath='{.clusters[0].cluster.server}' 2>/dev/null || echo 'N/A')}"
+  
   info "Generating report to: $report_file"
   
   cat > "$report_file" <<'REPORT_EOF'
@@ -2841,9 +2845,237 @@ deploy_monitoring() {
   # Wait for pods with progress (no timeout)
   wait_pods_ready "$ns"
 
+  # Setup advanced monitoring
+  setup_monitoring_advanced "$ns"
+
   info "Monitoring deployed!"
   info "  Grafana: https://$grafana_domain"
   info "  User: admin / Password: $GRAFANA_ADMIN_PASSWORD"
+}
+
+# Setup advanced monitoring (dashboards, alerts, scrape configs)
+setup_monitoring_advanced() {
+  local ns="${1:-monitoring}"
+  step "Configure advanced monitoring (dashboards, alerts, scraping)"
+  
+  # Wait for Prometheus and Grafana to be ready
+  info "Waiting for Prometheus API..."
+  local prom_ready=0
+  for i in {1..60}; do
+    if kubectl get svc -n "$ns" prometheus-operated &>/dev/null && \
+       kubectl port-forward -n "$ns" svc/prometheus-operated 9090:9090 &>/dev/null 2>&1; then
+      prom_ready=1
+      break
+    fi
+    sleep 2
+  done
+  
+  if [[ $prom_ready -eq 0 ]]; then
+    warn "Prometheus not ready, skipping advanced setup"
+    return 1
+  fi
+  
+  info "✓ Prometheus ready"
+  
+  # Setup Prometheus scrape targets (auto-discover ingress endpoints)
+  info "Configuring Prometheus scrape targets..."
+  kubectl apply -f - -n "$ns" <<'PROM_EOF'
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-additional-scrape-configs
+  namespace: monitoring
+data:
+  additional.yml: |
+    # Auto-discover services with prometheus.io annotations
+    - job_name: 'kubernetes-services'
+      kubernetes_sd_configs:
+        - role: service
+      relabel_configs:
+        - source_labels: [__meta_kubernetes_service_annotation_prometheus_io_scrape]
+          action: keep
+          regex: "true"
+        - source_labels: [__meta_kubernetes_service_annotation_prometheus_io_path]
+          action: replace
+          target_label: __metrics_path__
+          regex: (.+)
+        - source_labels: [__address__, __meta_kubernetes_service_annotation_prometheus_io_port]
+          action: replace
+          regex: ([^:]+)(?::\d+)?;(\d+)
+          replacement: $1:$2
+          target_label: __address__
+    
+    # Scrape Harbor if available
+    - job_name: 'harbor'
+      honor_timestamps: true
+      metrics_path: '/metrics'
+      scheme: http
+      kubernetes_sd_configs:
+        - role: pod
+          namespaces:
+            names:
+              - harbor
+      relabel_configs:
+        - source_labels: [__meta_kubernetes_pod_label_app]
+          action: keep
+          regex: 'harbor'
+        - source_labels: [__meta_kubernetes_pod_name]
+          action: replace
+          target_label: pod
+PROM_EOF
+
+  # Setup PrometheusRules for alerts
+  info "Creating alert rules..."
+  kubectl apply -f - -n "$ns" <<'ALERT_EOF'
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: cluster-alerts
+  namespace: monitoring
+spec:
+  groups:
+    - name: cluster.rules
+      interval: 30s
+      rules:
+        # Node alerts
+        - alert: NodeMemoryUsage
+          expr: (1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)) * 100 > 85
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "High memory usage on {{ $labels.node }}"
+            description: "Memory usage is {{ $value }}%"
+        
+        - alert: NodeCPUUsage
+          expr: (1 - (rate(node_cpu_seconds_total{mode="idle"}[5m]))) * 100 > 80
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "High CPU usage on {{ $labels.node }}"
+            description: "CPU usage is {{ $value }}%"
+        
+        # PVC alerts
+        - alert: PersistentVolumeUsage
+          expr: (kubelet_volume_stats_used_bytes / kubelet_volume_stats_capacity_bytes) * 100 > 80
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "High PVC usage: {{ $labels.persistentvolumeclaim }}"
+            description: "Usage is {{ $value }}%"
+        
+        # Pod restart alerts
+        - alert: PodRestarts
+          expr: rate(kube_pod_container_status_restarts_total[15m]) > 0.1
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Pod {{ $labels.pod }} restarting frequently"
+            description: "Restart rate: {{ $value }}/min"
+        
+        # LINSTOR alerts
+        - alert: LinstorNodeOffline
+          expr: linstor_node_is_online == 0
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: "LINSTOR node {{ $labels.node }} offline"
+            description: "LINSTOR node has been offline for 2+ minutes"
+ALERT_EOF
+
+  info "✓ Alert rules created"
+  
+  # Setup Grafana datasources and dashboards
+  info "Configuring Grafana datasources and dashboards..."
+  
+  # Wait for Grafana to be ready
+  local grafana_ready=0
+  for i in {1..30}; do
+    if kubectl exec -n "$ns" deployment/monitoring-grafana -- curl -s http://localhost:3000/api/health &>/dev/null; then
+      grafana_ready=1
+      break
+    fi
+    sleep 2
+  done
+  
+  if [[ $grafana_ready -eq 0 ]]; then
+    warn "Grafana not ready, skipping dashboard setup"
+    return 1
+  fi
+  
+  info "✓ Grafana ready"
+  
+  # Create secret for Grafana API access
+  kubectl create secret generic grafana-admin-secret \
+    --from-literal=admin-user=admin \
+    --from-literal=admin-password="$GRAFANA_ADMIN_PASSWORD" \
+    -n "$ns" \
+    --dry-run=client -o yaml | kubectl apply -f -
+  
+  # Import popular dashboards via ConfigMap + sidecar (kube-prometheus-stack includes dashboard sidecar)
+  info "Importing Grafana dashboards..."
+  kubectl apply -f - -n "$ns" <<'DASH_EOF'
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboard-cluster
+  namespace: monitoring
+  labels:
+    grafana_dashboard: "1"
+data:
+  cluster-overview.json: |
+    {
+      "dashboard": {
+        "title": "Cluster Overview",
+        "panels": [
+          {
+            "title": "Node CPU Usage",
+            "targets": [{"expr": "rate(node_cpu_seconds_total{mode=\"user\"}[5m]) * 100"}]
+          },
+          {
+            "title": "Node Memory Usage",
+            "targets": [{"expr": "(1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)) * 100"}]
+          },
+          {
+            "title": "Pod Count",
+            "targets": [{"expr": "count(kube_pod_info)"}]
+          },
+          {
+            "title": "PVC Usage",
+            "targets": [{"expr": "(kubelet_volume_stats_used_bytes / kubelet_volume_stats_capacity_bytes) * 100"}]
+          }
+        ]
+      }
+    }
+DASH_EOF
+
+  info "✓ Grafana dashboards configured"
+  
+  # Validate monitoring is operational
+  info "Validating monitoring setup..."
+  
+  local prom_targets=$(kubectl exec -n "$ns" -it prometheus-monitoring-kube-prom-prometheus-0 -- \
+    curl -s http://localhost:9090/api/v1/targets 2>/dev/null | grep -c '"health":"up"' || echo "0")
+  
+  info "  Prometheus targets UP: $prom_targets"
+  
+  local grafana_ds=$(kubectl exec -n "$ns" deployment/monitoring-grafana -- \
+    curl -s -H "Authorization: Bearer $(kubectl get secret -n "$ns" monitoring-grafana -o jsonpath='{.data.admin-api-key}' 2>/dev/null | base64 -d)" \
+    http://localhost:3000/api/datasources 2>/dev/null | grep -c '"name"' || echo "0")
+  
+  info "  Grafana datasources: $grafana_ds"
+  
+  info "✓ Advanced monitoring setup complete!"
+  info ""
+  info "Next steps:"
+  info "  1. Verify Prometheus targets: kubectl port-forward -n monitoring svc/prometheus-operated 9090:9090"
+  info "  2. Access Prometheus at: http://localhost:9090/targets"
+  info "  3. Create custom dashboards in Grafana for your services"
+  info "  4. Configure AlertManager notifications: kubectl edit secret -n monitoring alertmanager-monitoring-kube-prom-alertmanager"
 }
 
 # -----------------------------
