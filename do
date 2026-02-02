@@ -1418,7 +1418,7 @@ test_dns_resolution() {
 
 test_talos_api() {
   local start=$(date +%s)
-  if [[ -f "$TALOS_CONFIG" ]] && talosctl --talosconfig "$TALOS_CONFIG" version &>/dev/null; then
+  if [[ -f "${TALOSCONFIG:-$TALOSCONFIG_OUT}" ]] && talosctl version &>/dev/null; then
     local dur=$(($(date +%s) - start))
     info "  ✓ Talos API reachable"
     add_test_result "talos" "talos-api" "pass" "Talos API responding" "$dur"
@@ -1434,7 +1434,7 @@ test_talos_api() {
 test_etcd_health() {
   local start=$(date +%s)
   if [[ -f "$TALOS_CONFIG" ]]; then
-    local etcd_status=$(talosctl --talosconfig "$TALOS_CONFIG" etcd status 2>&1 || true)
+    local etcd_status=$(talosctl etcd status 2>&1 || true)
     if echo "$etcd_status" | grep -q "HEALTHY"; then
       local members=$(echo "$etcd_status" | grep -c "HEALTHY" || echo 0)
       local dur=$(($(date +%s) - start))
@@ -1452,7 +1452,7 @@ test_etcd_health() {
 test_talos_services() {
   local start=$(date +%s)
   if [[ -f "$TALOS_CONFIG" ]]; then
-    local svc_status=$(talosctl --talosconfig "$TALOS_CONFIG" services 2>&1 | head -20 || true)
+    local svc_status=$(talosctl services 2>&1 | head -20 || true)
     local running=$(echo "$svc_status" | grep -c "Running" || echo 0)
     local dur=$(($(date +%s) - start))
     if [[ "$running" -gt 5 ]]; then
@@ -2842,14 +2842,20 @@ post_apply_pipeline() {
   # Deploy additional components
   if [[ "$INSTALL_GITEA" == "1" ]]; then
     deploy_gitea
+  else
+    info "Skipping Gitea (INSTALL_GITEA=$INSTALL_GITEA)"
   fi
 
   if [[ "$INSTALL_HARBOR" == "1" ]]; then
     deploy_harbor
+  else
+    info "Skipping Harbor (INSTALL_HARBOR=$INSTALL_HARBOR)"
   fi
 
   if [[ "$INSTALL_MONITORING" == "1" ]]; then
     deploy_monitoring
+  else
+    info "Skipping Monitoring (INSTALL_MONITORING=$INSTALL_MONITORING)"
   fi
 
   step "cluster nodes"
