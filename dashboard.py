@@ -1738,77 +1738,37 @@ class ClusterDashboard:
         
         if page_index == 0:
             # Cluster Health Overview
-            return ("⚡ Klusterstatus", Panel(
-                self.render_cluster_health(), 
-                border_style="#44FF44", 
-                style=BG_STYLE
-            ))
+            return ("⚡ Klusterstatus", self.render_cluster_health(), "#44FF44")
         elif page_index == 1:
             # Pod Activity - live view
-            return ("🔄 Poddaktivitet", Panel(
-                self.render_pod_activity(),
-                border_style="#33AAFF",
-                style=BG_STYLE
-            ))
+            return ("🔄 Poddaktivitet", self.render_pod_activity(), "#33AAFF")
         elif page_index == 2:
             # Network Traffic indicators
-            return ("🌐 Nätverk", Panel(
-                self.render_network_status(),
-                border_style="#AA33FF",
-                style=BG_STYLE
-            ))
+            return ("🌐 Nätverk", self.render_network_status(), "#AA33FF")
         elif page_index == 3:
             # Storage Status
-            return ("💾 Lagring", Panel(
-                self.render_storage_status(),
-                border_style="#FF9933",
-                style=BG_STYLE
-            ))
+            return ("💾 Lagring", self.render_storage_status(), "#FF9933")
         elif page_index == 4:
             # Namespace Overview
-            return ("📦 Namespaces", Panel(
-                self.render_namespace_overview(),
-                border_style="#33FF99",
-                style=BG_STYLE
-            ))
+            return ("📦 Namespaces", self.render_namespace_overview(), "#33FF99")
         elif page_index == 5:
             # Test Results
             test_results = self._load_test_results()
             if test_results and test_results.get("tests"):
-                return ("🧪 Testresultat", Panel(
-                    self.render_test_cards(),
-                    border_style="#FFAA00",
-                    style=BG_STYLE
-                ))
+                return ("🧪 Testresultat", self.render_test_cards(), "#FFAA00")
             else:
                 # Show services instead
-                return ("🔌 Tjänster", Panel(
-                    self.render_services_status(),
-                    border_style="#FF5533",
-                    style=BG_STYLE
-                ))
+                return ("🔌 Tjänster", self.render_services_status(), "#FF5533")
         elif page_index == 6:
             # Proxmox VMs
             proxmox_data = self._load_proxmox_status()
             if proxmox_data.get("vms"):
-                return ("🖥️  VMs", Panel(
-                    self.render_proxmox_status(),
-                    border_style="#3366FF",
-                    style=BG_STYLE
-                ))
+                return ("🖥️  VMs", self.render_proxmox_status(), "#3366FF")
             else:
-                return ("🔌 Tjänster", Panel(
-                    self.render_services_status(),
-                    border_style="#FF5533",
-                    style=BG_STYLE
-                ))
+                return ("🔌 Tjänster", self.render_services_status(), "#FF5533")
         
         # Page 7: System vitals with animated gauges
-        return ("📊 Systemvitals", Panel(
-            self.render_system_vitals(),
-            border_style="#FFDD33",
-            style=BG_STYLE
-        ))
+        return ("📊 Systemvitals", self.render_system_vitals(), "#FFDD33")
 
     def render_pod_activity(self) -> Text:
         """Render live pod activity with animations"""
@@ -2983,6 +2943,10 @@ class ClusterDashboard:
         if show_control_room:
             title = "KONTROLLRUMMET"
             text.append(title, style="bold #FFFFFF on #3366FF")
+            # Show current page number
+            num_pages = 8
+            page_index = (self.frame // 40) % num_pages
+            text.append(f" [{page_index+1}/{num_pages}]", style="#666666")
         else:
             title = "MASKINRUMMET"
             text.append(title, style="bold #000000 on #CCCCCC")
@@ -3064,11 +3028,16 @@ class ClusterDashboard:
                 Layout(name="monitoring", ratio=2)
             )
             
-            # Get current page based on rotation
-            page_title, page_widget = self._get_completion_page()
+            # Get current page based on rotation (title, content, border_color)
+            page_title, page_content, page_color = self._get_completion_page()
             
             # Show rotating pages on left (main content)
-            layout["health"].update(page_widget)
+            layout["health"].update(Panel(
+                page_content,
+                border_style=page_color,
+                style=BG_STYLE,
+                title=page_title
+            ))
             
             # Show live activity panel on right
             layout["monitoring"].update(Panel(
