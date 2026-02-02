@@ -16,6 +16,30 @@ A production-ready [Talos Linux](https://www.talos.dev) Kubernetes cluster on Pr
 - **Certificates**: [cert-manager](https://cert-manager.io) for automatic TLS
 - **WebAssembly**: [Spin](https://github.com/siderolabs/extensions/tree/main/container-runtime/spin) runtime for Wasm workloads
 
+## Installation Modules (Recommended Grouping)
+
+Use these groupings when documenting or selecting what to deploy.
+
+### Core (cluster baseline)
+
+- Talos Kubernetes + Cilium
+- Piraeus/LINSTOR (LVM thin)
+- Traefik ingress
+- cert-manager
+
+### Platform Apps (developer workflow)
+
+- Harbor (container registry)
+- Gitea (Git service)
+- Argo CD (GitOps)
+
+### Ops & Admin (day-2 operations)
+
+- Monitoring (Prometheus + Grafana)
+- Logging stack (e.g., Loki + Promtail)
+- Backup (e.g., Velero + restic)
+- Policy & security (e.g., Kyverno or OPA Gatekeeper)
+
 ## Architecture
 
 ```
