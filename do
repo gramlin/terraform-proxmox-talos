@@ -42,6 +42,11 @@ load_config() {
   LB_IP_START=""
   LB_IP_END=""
   
+  USE_CENTRAL_HARBOR="false"
+  CENTRAL_HARBOR_URL=""
+  CENTRAL_HARBOR_USERNAME="admin"
+  CENTRAL_HARBOR_PASSWORD="Harbor12345"
+  
   PIRAEUS_OPERATOR_VERSION="2.10.4"
   LINSTOR_IMAGE_VERSION="v1.32.3"
   STORAGE_POOL_NAME="lvm"
@@ -94,6 +99,7 @@ load_config() {
   INSTALL_HARBOR=$(normalize_bool "$INSTALL_HARBOR")
   INSTALL_MONITORING=$(normalize_bool "$INSTALL_MONITORING")
   INSTALL_GITEA=$(normalize_bool "$INSTALL_GITEA")
+  USE_CENTRAL_HARBOR=$(normalize_bool "$USE_CENTRAL_HARBOR")
   WIPE_DISKS=$(normalize_bool "$WIPE_DISKS")
   AUTO_RESET_LINSTOR_DB=$(normalize_bool "$AUTO_RESET_LINSTOR_DB")
   LOG_ENABLED=$(normalize_bool "$LOG_ENABLED")
@@ -2480,10 +2486,48 @@ deploy_traefik() {
 }
 
 # -----------------------------
+# Configure Central Harbor
+# -----------------------------
+configure_central_harbor() {
+  info "Configuring cluster to use central Harbor registry at $CENTRAL_HARBOR_URL"
+  
+  # Create docker-registry secret for pulling images
+  kubectl create namespace default --dry-run=client -o yaml | kubectl apply -f -
+  
+  kubectl create secret docker-registry central-harbor-registry \
+    --docker-server="$CENTRAL_HARBOR_URL" \
+    --docker-username="$CENTRAL_HARBOR_USERNAME" \
+    --docker-password="$CENTRAL_HARBOR_PASSWORD" \
+    --namespace=default \
+    --dry-run=client -o yaml | kubectl apply -f -
+  
+  info "✓ Created docker-registry secret 'central-harbor-registry' in default namespace"
+  info ""
+  info "To use central Harbor in deployments:"
+  info "  1. Add to Pod spec:"
+  info "     imagePullSecrets:"
+  info "       - name: central-harbor-registry"
+  info ""
+  info "  2. Or set as default ServiceAccount imagePullSecret:"
+  info "     kubectl patch serviceaccount default -n <namespace> -p '{\"imagePullSecrets\":[{\"name\":\"central-harbor-registry\"}]}'"
+  info ""
+  info "Central Harbor: https://$CENTRAL_HARBOR_URL"
+}
+
+# -----------------------------
 # Harbor Container Registry
 # -----------------------------
 deploy_harbor() {
   step "deploy Harbor container registry"
+  
+  # Check if using central Harbor
+  if [[ "$USE_CENTRAL_HARBOR" == "1" ]]; then
+    info "Using central Harbor at: $CENTRAL_HARBOR_URL"
+    configure_central_harbor
+    return 0
+  fi
+  
+  # Deploy local Harbor
   need kubectl
   need helm
 
@@ -2503,6 +2547,26 @@ deploy_harbor() {
       warn "  Deleting stuck PVC: $pvc"
       kubectl delete pvc "$pvc" -n "$ns" --ignore-not-found
     done
+  fi
+
+  # Pre-create registry PVC if it doesn't exist (Helm sometimes misses this)
+  if ! kubectl get pvc harbor-registry -n "$ns" &>/dev/null; then
+    info "Creating harbor-registry PVC..."
+    kubectl apply -f - <<EOF
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: harbor-registry
+  namespace: $ns
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: $STORAGE_CLASS_NAME
+  resources:
+    requests:
+      storage: $HARBOR_REGISTRY_SIZE
+EOF
+    sleep 2
   fi
 
   # Create TLS certificate if cert-manager available
