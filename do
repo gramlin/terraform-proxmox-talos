@@ -140,7 +140,10 @@ load_config() {
 
 normalize_bool() {
   local val="${1:-}"
-  case "${val,,}" in
+  # Convert to lowercase using tr for bash 3.x compatibility (macOS)
+  local val_lower
+  val_lower=$(echo "$val" | tr '[:upper:]' '[:lower:]')
+  case "$val_lower" in
     true|yes|1|on) echo "1" ;;
     *) echo "0" ;;
   esac
@@ -149,7 +152,9 @@ normalize_bool() {
 apply_profile() {
   # Only apply profile defaults if values are still at script defaults
   # This allows do.cfg to override profile settings
-  case "${PROFILE,,}" in
+  local profile_lower
+  profile_lower=$(echo "$PROFILE" | tr '[:upper:]' '[:lower:]')
+  case "$profile_lower" in
     simple)
       : ${INGRESS_CONTROLLER:="cilium"}
       : ${INSTALL_HARBOR:="false"}
@@ -1067,7 +1072,7 @@ tf_abbrev_and_track() {
     # Match: "resource_name: Creating..." or "resource_name[N]: Creating..."
     if [[ "$line" =~ ^([^:]+):\ (Creating|Modifying|Destroying|Refreshing)\.\.\. ]]; then
       name="${BASH_REMATCH[1]}"
-      action="${BASH_REMATCH[2],,}"
+      action=$(echo "${BASH_REMATCH[2]}" | tr '[:upper:]' '[:lower:]')
       echo "[$(date -Iseconds)] MATCHED: name=$name action=$action" >> /tmp/tf_track_debug.log
       update_tf_resource "$name" "$action" ""
     # Match: "resource_name: Creation complete after Xs"
@@ -2570,6 +2575,113 @@ cmd_fix_linstor_db() {
   info "  kubectl get pods -n piraeus-datastore -l app.kubernetes.io/component=linstor-controller -w"
 }
 
+# Write health data for dashboard
+write_health_data() {
+  local health_file="$WORKDIR/.health-data.json"
+  
+  # Collect health metrics
+  local nodes_ready=0
+  local nodes_total=0
+  local pods_running=0
+  local pods_total=0
+  local cpu_usage=0
+  local memory_usage=0
+  
+  # Get node info
+  if kubectl get nodes -o json &>/dev/null; then
+    nodes_total=$(kubectl get nodes -o json 2>/dev/null | jq '.items | length')
+    nodes_ready=$(kubectl get nodes -o json 2>/dev/null | jq '[.items[] | select(.status.conditions[] | select(.type=="Ready" and .status=="True"))] | length')
+  fi
+  
+  # Get pod info
+  if kubectl get pods -A -o json &>/dev/null; then
+    pods_total=$(kubectl get pods -A -o json 2>/dev/null | jq '.items | length')
+    pods_running=$(kubectl get pods -A -o json 2>/dev/null | jq '[.items[] | select(.status.phase=="Running")] | length')
+  fi
+  
+  # Try to get metrics from prometheus if available
+  local prom_pod
+  prom_pod=$(kubectl get pods -n monitoring -l app.kubernetes.io/name=prometheus -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+  if [[ -n "$prom_pod" ]]; then
+    # Query CPU usage
+    cpu_usage=$(kubectl exec -n monitoring "$prom_pod" -- wget -qO- 'http://localhost:9090/api/v1/query?query=100-avg(rate(node_cpu_seconds_total{mode="idle"}[5m]))*100' 2>/dev/null | jq -r '.data.result[0].value[1] // 0' || echo "0")
+    
+    # Query memory usage
+    memory_usage=$(kubectl exec -n monitoring "$prom_pod" -- wget -qO- 'http://localhost:9090/api/v1/query?query=(1-sum(node_memory_MemAvailable_bytes)/sum(node_memory_MemTotal_bytes))*100' 2>/dev/null | jq -r '.data.result[0].value[1] // 0' || echo "0")
+  fi
+  
+  # Write JSON
+  cat > "$health_file" <<EOF
+{
+  "timestamp": "$(date -Iseconds)",
+  "nodes_total": $nodes_total,
+  "nodes_ready": $nodes_ready,
+  "pods_total": $pods_total,
+  "pods_running": $pods_running,
+  "cpu_usage": ${cpu_usage:-0},
+  "memory_usage": ${memory_usage:-0}
+}
+EOF
+}
+
+# Dashboard command - start in Maskinrummet mode
+cmd_dashboard() {
+  info "Starting dashboard (Maskinrummet)..."
+  
+  # Check if dashboard.py exists
+  if [[ ! -f "$WORKDIR/dashboard.py" ]]; then
+    die "dashboard.py not found in $WORKDIR"
+  fi
+  
+  # Check for rich library
+  if ! python3 -c "import rich" &>/dev/null; then
+    info "Installing rich library..."
+    pip3 install rich --quiet || pip install rich --quiet
+  fi
+  
+  # Start health data writer in background
+  (
+    while true; do
+      write_health_data 2>/dev/null || true
+      sleep 5
+    done
+  ) &
+  local health_pid=$!
+  trap "kill $health_pid 2>/dev/null" EXIT
+  
+  # Run dashboard
+  python3 "$WORKDIR/dashboard.py" --workdir "$WORKDIR" "$@"
+}
+
+# Kontrollrummet - monitoring dashboard mode
+cmd_kontrollrummet() {
+  info "Starting Kontrollrummet (Control Room)..."
+  
+  # Check if dashboard.py exists
+  if [[ ! -f "$WORKDIR/dashboard.py" ]]; then
+    die "dashboard.py not found in $WORKDIR"
+  fi
+  
+  # Check for rich library
+  if ! python3 -c "import rich" &>/dev/null; then
+    info "Installing rich library..."
+    pip3 install rich --quiet || pip install rich --quiet
+  fi
+  
+  # Start health data writer in background
+  (
+    while true; do
+      write_health_data 2>/dev/null || true
+      sleep 5
+    done
+  ) &
+  local health_pid=$!
+  trap "kill $health_pid 2>/dev/null" EXIT
+  
+  # Run dashboard in control room mode
+  python3 "$WORKDIR/dashboard.py" --workdir "$WORKDIR" --control-room "$@"
+}
+
 # Generate deployment summary report
 generate_report() {
   step "Generate deployment summary report"
@@ -3684,6 +3796,9 @@ Commands:
   deploy-gitea      Deploy Gitea
   report            Generate deployment summary report (.md)
   
+  dashboard         Start dashboard (Maskinrummet - deployment view)
+  kontrollrummet    Start control room dashboard (monitoring view)
+  
   config            Show current configuration
   info              Show cluster access info
   test              Run validation tests
@@ -3714,6 +3829,9 @@ Example:
   # Skip terraform, just bootstrap
   Edit do.cfg: RUN_TERRAFORM="false"
   ./do apply
+  
+  # Start monitoring dashboard
+  ./do kontrollrummet
 USAGE
 }
 
@@ -3747,6 +3865,8 @@ main() {
     deploy-monitoring) ensure_kubeconfig && deploy_monitoring ;;
     deploy-gitea)      ensure_kubeconfig && deploy_gitea ;;
     report)            generate_report ;;
+    dashboard|maskinrummet) shift; cmd_dashboard "$@" ;;
+    kontrollrummet|control-room) shift; cmd_kontrollrummet "$@" ;;
     config)            show_config ;;
     info)              ensure_kubeconfig && print_access_info ;;
     test|tests)        ensure_kubeconfig && load_cluster_vars && run_all_tests ;;

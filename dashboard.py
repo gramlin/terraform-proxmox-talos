@@ -172,13 +172,15 @@ class Step:
 
 
 class ClusterDashboard:
-    def __init__(self, workdir: str = ".", blinkenlicht: bool = False):
+    def __init__(self, workdir: str = ".", blinkenlicht: bool = False, control_room: bool = False):
         self.console = Console()
         self.workdir = workdir
         self.blinkenlicht = blinkenlicht
+        self.control_room = control_room  # Always show completed/monitoring view (Kontrollrummet)
         self.kubeconfig = self._find_kubeconfig()
         self.talosconfig = os.path.join(workdir, "talosconfig.yml")
         self.test_results_file = os.path.join(workdir, ".test-results.json")
+        self.health_data_file = os.path.join(workdir, ".health-data.json")  # Health data from do script
         self.steps: List[Step] = []
         self.test_results: dict = {}
         self.lock = threading.Lock()
@@ -1788,25 +1790,74 @@ class ClusterDashboard:
         text = Text()
         all_done = all(s.status == Status.SUCCESS for s in self.steps)
         
-        if not all_done:
+        if not all_done and not self.control_room:
             return text
         
         # Simple completion message
-        text.append("✓ Deployment Complete", style="bold #008800")
+        if all_done:
+            text.append("✓ Klustret är redo", style="bold #008800")
+        else:
+            text.append("◐ Övervakar kluster...", style="bold #3366FF")
         
-        # Stats line
-        elapsed = int(time.time() - self.start_time)
-        mins, secs = divmod(elapsed, 60)
-        text.append(f"  │  Time: {mins}m {secs}s", style="bold #000000")
+        # Stats line - load health data if available
+        health_data = self._load_health_data()
+        if health_data:
+            nodes = health_data.get("nodes_ready", 0)
+            total_nodes = health_data.get("nodes_total", 0)
+            text.append(f"  │  Noder: {nodes}/{total_nodes}", style="bold #008800" if nodes == total_nodes else "bold #FFAA33")
+            
+            pods = health_data.get("pods_running", 0)
+            text.append(f"  │  Poddar: {pods}", style="bold #000000")
+        else:
+            elapsed = int(time.time() - self.start_time)
+            mins, secs = divmod(elapsed, 60)
+            text.append(f"  │  Tid: {mins}m {secs}s", style="bold #000000")
         
         # Test results if available
         results = self._load_test_results()
         if results and results.get("tests"):
             passed = results.get("passed", 0)
             total = passed + results.get("failed", 0)
-            text.append(f"  │  Tests: {passed}/{total}", style="bold #008800" if results.get("failed", 0) == 0 else "bold #CC0000")
+            text.append(f"  │  Tester: {passed}/{total}", style="bold #008800" if results.get("failed", 0) == 0 else "bold #CC0000")
         
         return text
+
+    def render_control_room_status(self) -> Text:
+        """Render control room status when deployment is not complete."""
+        text = Text()
+        
+        # Load health data from do script
+        health_data = self._load_health_data()
+        
+        completed = sum(1 for s in self.steps if s.status == Status.SUCCESS)
+        total = len(self.steps)
+        
+        if health_data:
+            nodes = health_data.get("nodes_ready", 0)
+            total_nodes = health_data.get("nodes_total", 0)
+            text.append(f"◐ Övervakar  │  Noder: {nodes}/{total_nodes}", style="bold #3366FF")
+            
+            if health_data.get("cpu_usage"):
+                text.append(f"  │  CPU: {health_data['cpu_usage']:.1f}%", style="bold #000000")
+            if health_data.get("memory_usage"):
+                text.append(f"  │  Minne: {health_data['memory_usage']:.1f}%", style="bold #000000")
+        else:
+            text.append(f"◐ Övervakar kluster  │  Steg: {completed}/{total}", style="bold #3366FF")
+        
+        return text
+
+    def _load_health_data(self) -> dict:
+        """Load health data from JSON file (written by do script)"""
+        if os.path.isfile(self.health_data_file):
+            try:
+                mtime = os.path.getmtime(self.health_data_file)
+                # Only use if updated in last 60 seconds
+                if time.time() - mtime < 60:
+                    with open(self.health_data_file, "r") as f:
+                        return json.load(f)
+            except (json.JSONDecodeError, IOError, OSError):
+                pass
+        return {}
 
     def render_preflight(self) -> Table:
         """Render preflight status panel"""
@@ -2430,21 +2481,28 @@ class ClusterDashboard:
         
         # Check if all complete
         all_done = all(s.status == Status.SUCCESS for s in self.steps)
+        show_control_room = self.control_room or all_done
+        
         if all_done and self.completion_frame is None:
             self.completion_frame = self.frame
         
         # Status icon
-        if all_done:
-            text.append(" ✓ ", style="bold #33FF33")
+        if show_control_room:
+            radar = RADAR_FRAMES[self.frame % len(RADAR_FRAMES)]
+            text.append(f" {radar} ", style="bold #3366FF")
         elif any(s.status == Status.WAITING for s in self.steps):
             spinner = SPINNER_FRAMES[self.frame % len(SPINNER_FRAMES)]
             text.append(f" {spinner} ", style="bold #FFAA33")
         else:
             text.append(" ○ ", style="bold #666666")
         
-        # Title - clear and readable
-        title = "CURE BACKBONE DEPLOY"
-        text.append(title, style="bold #000000 on #CCCCCC")
+        # Title - depends on mode
+        if show_control_room:
+            title = "KONTROLLRUMMET"
+            text.append(title, style="bold #FFFFFF on #3366FF")
+        else:
+            title = "MASKINRUMMET"
+            text.append(title, style="bold #000000 on #CCCCCC")
         
         text.append("  │  ", style="#444444")
         text.append_text(self.render_progress_bar())
@@ -2487,10 +2545,13 @@ class ClusterDashboard:
     def render_layout(self) -> Layout:
         all_done = all(s.status == Status.SUCCESS for s in self.steps)
         
+        # Control room mode always shows the monitoring view
+        show_control_room = self.control_room or all_done
+        
         layout = Layout()
         
-        if all_done:
-            # CELEBRATION MODE! 🎉 - Show cluster health instead of deployment steps
+        if show_control_room:
+            # KONTROLLRUMMET 🎛️ - Show cluster health/monitoring
             if self.blinkenlicht:
                 layout.split_column(
                     Layout(name="header", size=3),
@@ -2506,7 +2567,13 @@ class ClusterDashboard:
                     Layout(name="main"),
                     Layout(name="footer", size=3)
                 )
-            layout["celebration"].update(Panel(self.render_celebration(), border_style="#FFD700", style=BG_STYLE, title="🏆 VICTORY", title_align="center"))
+            
+            # Show status banner
+            if self.control_room and not all_done:
+                # Monitoring mode but deployment not complete
+                layout["celebration"].update(Panel(self.render_control_room_status(), border_style="#3366FF", style=BG_STYLE, title="🎛️  KONTROLLRUMMET", title_align="center"))
+            else:
+                layout["celebration"].update(Panel(self.render_celebration(), border_style="#FFD700", style=BG_STYLE, title="🎛️  KONTROLLRUMMET", title_align="center"))
             
             # Rotating health pages in main area
             layout["main"].split_row(
@@ -2537,8 +2604,9 @@ class ClusterDashboard:
                 stats_text.append(f"Tests: {passed}/{total} passed", style="bold #008800" if failed == 0 else "bold #CC0000")
             
             stats_text.append("\n\n(Rotating pages every 5s)", style="#888888")
-            layout["monitoring"].update(Panel(stats_text, border_style="#CCCCCC", style=BG_STYLE, title="📈 Summary"))
+            layout["monitoring"].update(Panel(stats_text, border_style="#CCCCCC", style=BG_STYLE, title="📈 Översikt"))
         else:
+            # MASKINRUMMET ⚙️ - Deployment in progress
             if self.blinkenlicht:
                 layout.split_column(
                     Layout(name="header", size=3),
@@ -2553,8 +2621,8 @@ class ClusterDashboard:
                     Layout(name="footer", size=3)
                 )
         
-        # Main area: steps on left, operations in middle, tests on right (only when not all_done)
-        if not all_done:
+        # Main area: steps on left, operations in middle, tests on right (only when in Maskinrummet)
+        if not show_control_room:
             # Dynamically build middle column based on what has data
             tf_data = self._load_tf_resources()
             talos_data = self._load_talos_status()
@@ -2740,8 +2808,20 @@ def main():
     parser.add_argument("--once", "-1", action="store_true", help="Run once")
     parser.add_argument("--refresh", "-r", type=float, default=2.0, help="Refresh rate")
     parser.add_argument("--blinkenlicht", "-b", action="store_true", help="Enable blinkenlicht panel")
+    parser.add_argument("--control-room", "-c", action="store_true", 
+                        help="Kontrollrummet: Always show monitoring view (skip deployment progress)")
+    parser.add_argument("--maskinrummet", "-m", action="store_true",
+                        help="Maskinrummet: Show deployment progress (default)")
     args = parser.parse_args()
-    dashboard = ClusterDashboard(workdir=args.workdir, blinkenlicht=args.blinkenlicht)
+    
+    # Control room mode takes precedence unless explicitly in maskinrummet
+    control_room = args.control_room and not args.maskinrummet
+    
+    dashboard = ClusterDashboard(
+        workdir=args.workdir, 
+        blinkenlicht=args.blinkenlicht,
+        control_room=control_room
+    )
     if args.once:
         dashboard.run_once()
     else:
