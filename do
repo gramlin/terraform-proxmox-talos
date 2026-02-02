@@ -284,12 +284,22 @@ progress_fail() { printf "\r\033[K  ✗ %s\n" "$*"; }
 fix_stuck_pvc_mount() {
   local ns="$1"
   local pvc_name="$2"
+  local storage_class
+  storage_class=$(kubectl get pvc "$pvc_name" -n "$ns" -o jsonpath='{.spec.storageClassName}' 2>/dev/null || echo "")
   
   # Check if any pod has mount failure for this PVC
   local events=$(kubectl get events -n "$ns" --field-selector reason=FailedMount 2>/dev/null | grep "$pvc_name" || true)
   
+  local is_linstor_sc
+  is_linstor_sc=$(echo "$storage_class" | grep -c "linstor" || true)
+
   if echo "$events" | grep -qE "Bad magic number|superblock.*corrupt|failed to run fsck"; then
-    warn "Detected LINSTOR format bug for PVC $pvc_name - recreating..."
+    warn "Detected LINSTOR format bug for PVC $pvc_name (sc=$storage_class) - recreating..."
+  elif [[ "$is_linstor_sc" -gt 0 ]] && echo "$events" | grep -qE "MountVolume.SetUp failed"; then
+    warn "Detected LINSTOR mount failure for PVC $pvc_name (sc=$storage_class) - recreating..."
+  else
+    return 1
+  fi
     
     # Get the pod using this PVC
     local pod_name=$(kubectl get pods -n "$ns" -o json 2>/dev/null | \
@@ -302,13 +312,12 @@ fix_stuck_pvc_mount() {
     
     # Delete the pod to trigger recreation
     if [[ -n "$pod_name" ]]; then
+      warn "Deleting pod $pod_name to recreate PVC $pvc_name"
       kubectl delete pod "$pod_name" -n "$ns" --wait=false 2>/dev/null || true
     fi
     
-    info "PVC $pvc_name deleted - will be recreated automatically"
-    return 0
-  fi
-  return 1
+  info "PVC $pvc_name deleted - will be recreated automatically"
+  return 0
 }
 
 wait_progress() {
@@ -342,6 +351,7 @@ wait_pods_ready() {
   local label="${2:-}"
   local start=$SECONDS
   local last_details_time=0
+  local timeout="${WAIT_PODS_TIMEOUT:-0}"
   
   local selector=""
   [[ -n "$label" ]] && selector="-l $label"
@@ -352,6 +362,11 @@ wait_pods_ready() {
     local elapsed=$((SECONDS - start))
     local elapsed_min=$((elapsed / 60))
     local elapsed_sec=$((elapsed % 60))
+
+    if [[ "$timeout" -gt 0 && $elapsed -ge $timeout ]]; then
+      warn "Timeout waiting for pods in $ns to be ready (${elapsed}s)"
+      return 1
+    fi
     
     # Get pod data once
     local pod_data pvc_data
