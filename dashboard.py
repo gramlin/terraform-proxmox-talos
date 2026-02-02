@@ -1727,68 +1727,27 @@ class ClusterDashboard:
         return text
 
     def render_celebration(self) -> Text:
-        """Render a celebration when deployment completes!"""
+        """Render completion status (simple, readable)."""
         text = Text()
         all_done = all(s.status == Status.SUCCESS for s in self.steps)
         
         if not all_done:
             return text
         
-        # Time since completion
-        celebration_duration = self.frame - (self.completion_frame or self.frame)
-        
-        # Celebration colors
-        colors = ["#FF3333", "#FF7F00", "#FFFF00", "#00FF00", "#00FFFF", "#0000FF", "#8B00FF"]
-        
-        # Fireworks!
-        firework_chars = ["✦", "✧", "✶", "✷", "✸", "✹", "★", "☆", "✵", "✴"]
-        
-        lines = []
-        
-        # Banner line 1 - stars
-        line1 = ""
-        for i in range(50):
-            if (self.frame + i) % 5 == 0:
-                line1 += firework_chars[(self.frame + i) % len(firework_chars)]
-            else:
-                line1 += " "
-        text.append(f"{line1}\n")
-        
-        # Apply rainbow colors to banner
-        banner_text = " 🎉  DEPLOYMENT COMPLETE!  🎉 "
-        for i, char in enumerate(banner_text):
-            color = colors[(self.frame + i) % len(colors)]
-            text.append(char, style=f"bold {color} on {BG_COLOR}")
-        text.append("\n")
+        # Simple completion message
+        text.append("✓ Deployment Complete", style="bold #008800")
         
         # Stats line
         elapsed = int(time.time() - self.start_time)
         mins, secs = divmod(elapsed, 60)
-        text.append(f"     Time: {mins}m {secs}s", style="bold #000000")
+        text.append(f"  │  Time: {mins}m {secs}s", style="bold #000000")
         
         # Test results if available
         results = self._load_test_results()
         if results and results.get("tests"):
             passed = results.get("passed", 0)
             total = passed + results.get("failed", 0)
-            text.append(f"  │  Tests: {passed}/{total} ✓", style="bold #008800" if results.get("failed", 0) == 0 else "bold #CC0000")
-        
-        text.append("\n")
-        
-        # Fireworks line 2
-        line2 = ""
-        for i in range(50):
-            if (self.frame + i + 3) % 7 == 0:
-                line2 += firework_chars[(self.frame + i * 2) % len(firework_chars)]
-            else:
-                line2 += " "
-        
-        for i, char in enumerate(line2):
-            if char != " ":
-                color = colors[(self.frame + i) % len(colors)]
-                text.append(char, style=color)
-            else:
-                text.append(char)
+            text.append(f"  │  Tests: {passed}/{total}", style="bold #008800" if results.get("failed", 0) == 0 else "bold #CC0000")
         
         return text
 
@@ -2426,22 +2385,9 @@ class ClusterDashboard:
         else:
             text.append(" ○ ", style="bold #666666")
         
-        # Title with rainbow animation when complete
+        # Title - clear and readable
         title = "CURE BACKBONE DEPLOY"
-        if all_done:
-            # Rainbow celebration!
-            colors = ["#FF0000", "#FF7F00", "#FFFF00", "#00FF00", "#0000FF", "#4B0082", "#9400D3"]
-            for i, char in enumerate(title):
-                color = colors[(self.frame + i) % len(colors)]
-                text.append(char, style=f"bold {color} on {BG_COLOR}")
-        else:
-            # Normal with subtle wave
-            for i, char in enumerate(title):
-                phase = (self.frame + i) % 20
-                if phase < 5:
-                    text.append(char, style=f"bold #000000 on {BG_COLOR}")
-                else:
-                    text.append(char, style=f"bold #222222 on {BG_COLOR}")
+        text.append(title, style="bold #000000 on #CCCCCC")
         
         text.append("  │  ", style="#444444")
         text.append_text(self.render_progress_bar())
