@@ -1731,31 +1731,63 @@ class ClusterDashboard:
 
     def _get_completion_page(self) -> tuple:
         """Return the current completion page (title, content_widget).
-        Rotates through different health check pages every 5 seconds."""
-        # Rotate pages every 5 seconds (15 frames at ~3 fps)
-        page_index = (self.frame // 15) % 4
+        Rotates through different health check pages every 4 seconds."""
+        # Rotate pages every 4 seconds (40 frames at ~10 fps)
+        num_pages = 8  # More pages for Kontrollrummet!
+        page_index = (self.frame // 40) % num_pages
         
         if page_index == 0:
-            # Cluster Health
-            return ("⚡ Cluster Status", Panel(
+            # Cluster Health Overview
+            return ("⚡ Klusterstatus", Panel(
                 self.render_cluster_health(), 
                 border_style="#44FF44", 
                 style=BG_STYLE
             ))
         elif page_index == 1:
+            # Pod Activity - live view
+            return ("🔄 Poddaktivitet", Panel(
+                self.render_pod_activity(),
+                border_style="#33AAFF",
+                style=BG_STYLE
+            ))
+        elif page_index == 2:
+            # Network Traffic indicators
+            return ("🌐 Nätverk", Panel(
+                self.render_network_status(),
+                border_style="#AA33FF",
+                style=BG_STYLE
+            ))
+        elif page_index == 3:
+            # Storage Status
+            return ("💾 Lagring", Panel(
+                self.render_storage_status(),
+                border_style="#FF9933",
+                style=BG_STYLE
+            ))
+        elif page_index == 4:
+            # Namespace Overview
+            return ("📦 Namespaces", Panel(
+                self.render_namespace_overview(),
+                border_style="#33FF99",
+                style=BG_STYLE
+            ))
+        elif page_index == 5:
             # Test Results
             test_results = self._load_test_results()
             if test_results and test_results.get("tests"):
-                return ("🧪 Test Results", Panel(
+                return ("🧪 Testresultat", Panel(
                     self.render_test_cards(),
                     border_style="#FFAA00",
                     style=BG_STYLE
                 ))
             else:
-                # Fallback to proxmox if no tests
-                page_index = 2
-        
-        if page_index == 2:
+                # Show services instead
+                return ("🔌 Tjänster", Panel(
+                    self.render_services_status(),
+                    border_style="#FF5533",
+                    style=BG_STYLE
+                ))
+        elif page_index == 6:
             # Proxmox VMs
             proxmox_data = self._load_proxmox_status()
             if proxmox_data.get("vms"):
@@ -1765,25 +1797,476 @@ class ClusterDashboard:
                     style=BG_STYLE
                 ))
             else:
-                page_index = 3
+                return ("🔌 Tjänster", Panel(
+                    self.render_services_status(),
+                    border_style="#FF5533",
+                    style=BG_STYLE
+                ))
         
-        if page_index == 3:
-            # Info / Next Steps
-            info_text = Text()
-            info_text.append("✓ Cluster deployment complete!\n\n", style="bold #008800")
-            info_text.append("Next steps:\n", style="bold #000000")
-            info_text.append("  • Run './do report' for full deployment status\n", style="#000000")
-            info_text.append("  • Run './do info' for access information\n", style="#000000")
-            info_text.append("  • Run './do test' for validation tests\n", style="#000000")
-            info_text.append("\nDashboard rotates through health metrics every 5 seconds.", style="#444444")
-            return ("📊 Info", Panel(info_text, border_style="#CCCCCC", style=BG_STYLE))
-        
-        # Default fallback
-        return ("📊 Info", Panel(
-            Text("Cluster deployment complete!\nRun './do report' for status"),
-            border_style="#444444",
+        # Page 7: System vitals with animated gauges
+        return ("📊 Systemvitals", Panel(
+            self.render_system_vitals(),
+            border_style="#FFDD33",
             style=BG_STYLE
         ))
+
+    def render_pod_activity(self) -> Text:
+        """Render live pod activity with animations"""
+        text = Text()
+        
+        # Get pod data
+        success, output = self._kubectl(["get", "pods", "-A", "-o", "json"], timeout=5)
+        if not success:
+            text.append("Väntar på klusteranslutning...\n", style="#666666")
+            spinner = SPINNER_FRAMES[self.frame % len(SPINNER_FRAMES)]
+            text.append(f"  {spinner}", style="#FFAA33")
+            return text
+        
+        try:
+            data = json.loads(output)
+            pods = data.get("items", [])
+            
+            # Count by status
+            running = sum(1 for p in pods if p.get("status", {}).get("phase") == "Running")
+            pending = sum(1 for p in pods if p.get("status", {}).get("phase") == "Pending")
+            failed = sum(1 for p in pods if p.get("status", {}).get("phase") == "Failed")
+            total = len(pods)
+            
+            # Animated activity bar
+            activity = PULSE_FRAMES[self.frame % len(PULSE_FRAMES)]
+            text.append(f"{activity} ", style="#33FF33")
+            text.append("LIVE PODDAR\n\n", style="bold #000000")
+            
+            # Status bars with animations
+            bar_width = 20
+            running_bar = int((running / max(total, 1)) * bar_width)
+            
+            text.append("Kör:      ", style="#000000")
+            text.append("█" * running_bar, style="#33FF33")
+            text.append("░" * (bar_width - running_bar), style="#444444")
+            text.append(f" {running}\n", style="bold #33FF33")
+            
+            if pending > 0:
+                pending_bar = int((pending / max(total, 1)) * bar_width)
+                pulse = BOUNCE_FRAMES[self.frame % len(BOUNCE_FRAMES)]
+                text.append(f"Väntar {pulse}  ", style="#FFAA33")
+                text.append("█" * pending_bar, style="#FFAA33")
+                text.append("░" * (bar_width - pending_bar), style="#444444")
+                text.append(f" {pending}\n", style="bold #FFAA33")
+            
+            if failed > 0:
+                text.append("Fel:      ", style="#FF3333")
+                text.append(f"{'█' * min(failed, bar_width)}", style="#FF3333")
+                text.append(f" {failed}\n", style="bold #FF3333")
+            
+            text.append(f"\nTotalt: {total} poddar", style="#666666")
+            
+            # Show recent pod activity (containers with restarts)
+            restarts = []
+            for pod in pods:
+                ns = pod.get("metadata", {}).get("namespace", "")
+                name = pod.get("metadata", {}).get("name", "")[:20]
+                for cs in pod.get("status", {}).get("containerStatuses", []):
+                    rc = cs.get("restartCount", 0)
+                    if rc > 0:
+                        restarts.append((ns, name, rc))
+            
+            if restarts:
+                text.append("\n\n⚠ Senaste omstarter:\n", style="#FFAA33")
+                for ns, name, rc in sorted(restarts, key=lambda x: -x[2])[:3]:
+                    text.append(f"  {ns}/{name}: ", style="#666666")
+                    text.append(f"{rc}x\n", style="#FFAA33")
+                    
+        except Exception as e:
+            text.append(f"Fel: {str(e)[:30]}", style="#FF3333")
+        
+        return text
+
+    def render_network_status(self) -> Text:
+        """Render network status with activity indicators"""
+        text = Text()
+        
+        # Animated network icon
+        net_anim = NETWORK_FRAMES[self.frame % len(NETWORK_FRAMES)]
+        text.append(f"{net_anim} ", style="#33AAFF")
+        text.append("NÄTVERKSSTATUS\n\n", style="bold #000000")
+        
+        # Get services with LoadBalancer
+        success, output = self._kubectl(["get", "svc", "-A", "-o", "json"], timeout=5)
+        if success:
+            try:
+                data = json.loads(output)
+                services = data.get("items", [])
+                
+                lb_services = [s for s in services if s.get("spec", {}).get("type") == "LoadBalancer"]
+                cluster_ip = [s for s in services if s.get("spec", {}).get("type") == "ClusterIP"]
+                
+                # LoadBalancer services
+                text.append("LoadBalancer: ", style="#000000")
+                text.append(f"{len(lb_services)}", style="bold #33FF33")
+                text.append(" aktiva\n", style="#666666")
+                
+                for svc in lb_services[:4]:
+                    name = svc.get("metadata", {}).get("name", "")[:15]
+                    ns = svc.get("metadata", {}).get("namespace", "")[:10]
+                    ingress = svc.get("status", {}).get("loadBalancer", {}).get("ingress", [])
+                    ip = ingress[0].get("ip", "pending") if ingress else "pending"
+                    
+                    pulse = PULSE_FRAMES[(self.frame + hash(name)) % len(PULSE_FRAMES)]
+                    text.append(f"  {pulse} ", style="#33FF33" if ip != "pending" else "#FFAA33")
+                    text.append(f"{ns}/{name}: ", style="#666666")
+                    text.append(f"{ip}\n", style="#000000" if ip != "pending" else "#FFAA33")
+                
+                text.append(f"\nClusterIP: ", style="#000000")
+                text.append(f"{len(cluster_ip)}", style="bold #3366FF")
+                text.append(" tjänster\n", style="#666666")
+                
+            except Exception:
+                pass
+        
+        # Cilium status
+        success, output = self._kubectl(["get", "pods", "-n", "kube-system", "-l", "k8s-app=cilium", "-o", "json"], timeout=5)
+        if success:
+            try:
+                data = json.loads(output)
+                cilium_pods = len([p for p in data.get("items", []) if p.get("status", {}).get("phase") == "Running"])
+                
+                net_pulse = ARROW_FRAMES[self.frame % len(ARROW_FRAMES)]
+                text.append(f"\n{net_pulse} Cilium agenter: ", style="#000000")
+                text.append(f"{cilium_pods}", style="bold #33FF33")
+            except Exception:
+                pass
+        
+        return text
+
+    def render_storage_status(self) -> Text:
+        """Render storage status with LINSTOR metrics"""
+        text = Text()
+        
+        disk_anim = DISK_FRAMES[self.frame % len(DISK_FRAMES)]
+        text.append(f"{disk_anim} ", style="#FF9933")
+        text.append("LAGRINGSSTATUS\n\n", style="bold #000000")
+        
+        # PVC status
+        success, output = self._kubectl(["get", "pvc", "-A", "-o", "json"], timeout=5)
+        if success:
+            try:
+                data = json.loads(output)
+                pvcs = data.get("items", [])
+                
+                bound = sum(1 for p in pvcs if p.get("status", {}).get("phase") == "Bound")
+                pending = sum(1 for p in pvcs if p.get("status", {}).get("phase") == "Pending")
+                total = len(pvcs)
+                
+                # Storage bar
+                bar_width = 20
+                bound_pct = bound / max(total, 1)
+                
+                text.append("PVC Status: ", style="#000000")
+                text.append("█" * int(bound_pct * bar_width), style="#33FF33")
+                if pending > 0:
+                    text.append("▒" * int((pending / max(total, 1)) * bar_width), style="#FFAA33")
+                text.append("░" * (bar_width - int(bound_pct * bar_width) - int((pending / max(total, 1)) * bar_width)), style="#444444")
+                text.append(f" {bound}/{total}\n", style="bold #000000")
+                
+                if pending > 0:
+                    pulse = BOUNCE_FRAMES[self.frame % len(BOUNCE_FRAMES)]
+                    text.append(f"  {pulse} {pending} väntar...\n", style="#FFAA33")
+                
+                # List some PVCs
+                text.append("\nVolymer:\n", style="#666666")
+                for pvc in pvcs[:5]:
+                    name = pvc.get("metadata", {}).get("name", "")[:18]
+                    ns = pvc.get("metadata", {}).get("namespace", "")[:8]
+                    phase = pvc.get("status", {}).get("phase", "?")
+                    size = pvc.get("spec", {}).get("resources", {}).get("requests", {}).get("storage", "?")
+                    
+                    icon = "●" if phase == "Bound" else "○"
+                    color = "#33FF33" if phase == "Bound" else "#FFAA33"
+                    text.append(f"  {icon} ", style=color)
+                    text.append(f"{ns}/{name} ", style="#666666")
+                    text.append(f"{size}\n", style="#000000")
+                    
+            except Exception:
+                pass
+        
+        # LINSTOR status
+        success, output = self._kubectl(["get", "pods", "-n", "piraeus-datastore", "-l", "app.kubernetes.io/component=linstor-controller", "-o", "json"], timeout=5)
+        if success:
+            try:
+                data = json.loads(output)
+                if data.get("items"):
+                    server_pulse = SERVER_FRAMES[self.frame % len(SERVER_FRAMES)]
+                    text.append(f"\n{server_pulse} LINSTOR: ", style="#000000")
+                    text.append("Online", style="bold #33FF33")
+            except Exception:
+                pass
+        
+        return text
+
+    def render_namespace_overview(self) -> Text:
+        """Render namespace overview with pod counts"""
+        text = Text()
+        
+        earth = EARTH_FRAMES[self.frame % len(EARTH_FRAMES)]
+        text.append(f"{earth} ", style="#33FF99")
+        text.append("NAMESPACES\n\n", style="bold #000000")
+        
+        success, output = self._kubectl(["get", "pods", "-A", "-o", "json"], timeout=5)
+        if success:
+            try:
+                data = json.loads(output)
+                pods = data.get("items", [])
+                
+                # Count pods per namespace
+                ns_counts = {}
+                for pod in pods:
+                    ns = pod.get("metadata", {}).get("namespace", "unknown")
+                    phase = pod.get("status", {}).get("phase", "Unknown")
+                    if ns not in ns_counts:
+                        ns_counts[ns] = {"running": 0, "other": 0}
+                    if phase == "Running":
+                        ns_counts[ns]["running"] += 1
+                    else:
+                        ns_counts[ns]["other"] += 1
+                
+                # Sort by pod count
+                sorted_ns = sorted(ns_counts.items(), key=lambda x: -(x[1]["running"] + x[1]["other"]))
+                
+                max_pods = max((v["running"] + v["other"]) for v in ns_counts.values()) if ns_counts else 1
+                bar_width = 15
+                
+                for ns, counts in sorted_ns[:8]:
+                    total = counts["running"] + counts["other"]
+                    running = counts["running"]
+                    bar_len = int((total / max_pods) * bar_width)
+                    running_bar = int((running / max(total, 1)) * bar_len)
+                    
+                    # Animated indicator for namespaces with activity
+                    if counts["other"] > 0:
+                        indicator = SPINNER_FRAMES[self.frame % len(SPINNER_FRAMES)]
+                        text.append(f"{indicator} ", style="#FFAA33")
+                    else:
+                        text.append("● ", style="#33FF33")
+                    
+                    text.append(f"{ns[:12]:<12} ", style="#000000")
+                    text.append("█" * running_bar, style="#33FF33")
+                    text.append("▒" * (bar_len - running_bar), style="#FFAA33")
+                    text.append("░" * (bar_width - bar_len), style="#333333")
+                    text.append(f" {running}/{total}\n", style="#666666")
+                    
+            except Exception:
+                pass
+        
+        return text
+
+    def render_services_status(self) -> Text:
+        """Render key services status"""
+        text = Text()
+        
+        rocket = ROCKET_FRAMES[self.frame % len(ROCKET_FRAMES)]
+        text.append(f"{rocket} ", style="#FF5533")
+        text.append("TJÄNSTER\n\n", style="bold #000000")
+        
+        # Check key services
+        services_to_check = [
+            ("traefik", "traefik", "Traefik Ingress"),
+            ("harbor", "harbor-core", "Harbor Registry"),
+            ("monitoring", "prometheus-operated", "Prometheus"),
+            ("monitoring", "grafana", "Grafana"),
+            ("gitea", "gitea-http", "Gitea"),
+            ("argocd", "argocd-server", "Argo CD"),
+            ("piraeus-datastore", "linstor-controller", "LINSTOR"),
+            ("cert-manager", "cert-manager", "Cert Manager"),
+        ]
+        
+        for ns, svc_name, display_name in services_to_check:
+            success, output = self._kubectl(["get", "svc", svc_name, "-n", ns, "-o", "json"], timeout=2)
+            if success:
+                pulse = PULSE_FRAMES[(self.frame + hash(svc_name)) % len(PULSE_FRAMES)]
+                text.append(f"  {pulse} ", style="#33FF33")
+                text.append(f"{display_name}\n", style="#000000")
+            else:
+                text.append(f"  ○ ", style="#666666")
+                text.append(f"{display_name}\n", style="#666666")
+        
+        return text
+
+    def render_system_vitals(self) -> Text:
+        """Render system vitals with animated gauges"""
+        text = Text()
+        
+        # Get health data
+        health_data = self._load_health_data()
+        metrics = self._get_cluster_metrics()
+        
+        lightning = LIGHTNING_FRAMES[self.frame % len(LIGHTNING_FRAMES)]
+        text.append(f"{lightning} ", style="#FFDD33")
+        text.append("SYSTEMVITALS\n\n", style="bold #000000")
+        
+        # CPU Gauge
+        cpu = health_data.get("cpu_usage", metrics.get("cpu_usage", 0))
+        text.append("CPU:    ", style="#000000")
+        text.append(self._render_gauge(cpu, 100), style="")
+        text.append(f" {cpu:.1f}%\n", style="bold #000000")
+        
+        # Memory Gauge  
+        mem = health_data.get("memory_usage", metrics.get("memory_usage", 0))
+        text.append("Minne:  ", style="#000000")
+        text.append(self._render_gauge(mem, 100), style="")
+        text.append(f" {mem:.1f}%\n", style="bold #000000")
+        
+        # Nodes
+        nodes_ready = health_data.get("nodes_ready", metrics.get("nodes_ready", 0))
+        nodes_total = health_data.get("nodes_total", metrics.get("nodes_total", 0))
+        node_pct = (nodes_ready / max(nodes_total, 1)) * 100
+        text.append("Noder:  ", style="#000000")
+        text.append(self._render_gauge(node_pct, 100), style="")
+        text.append(f" {nodes_ready}/{nodes_total}\n", style="bold #000000")
+        
+        # Pods
+        pods_running = health_data.get("pods_running", 0)
+        pods_total = health_data.get("pods_total", 1)
+        pod_pct = (pods_running / max(pods_total, 1)) * 100
+        text.append("Poddar: ", style="#000000")
+        text.append(self._render_gauge(pod_pct, 100), style="")
+        text.append(f" {pods_running}/{pods_total}\n", style="bold #000000")
+        
+        # Activity indicator
+        text.append("\n")
+        for i in range(20):
+            phase = (self.frame + i * 3) % len(METER_FRAMES)
+            color = ["#33FF33", "#66FF33", "#99FF33", "#CCFF33", "#FFFF33"][i % 5]
+            text.append(WAVE_FRAMES[(self.frame + i) % len(WAVE_FRAMES)], style=color)
+        
+        return text
+
+    def _render_gauge(self, value: float, max_val: float) -> Text:
+        """Render an animated gauge bar"""
+        text = Text()
+        width = 15
+        filled = int((value / max(max_val, 1)) * width)
+        
+        # Color based on value
+        if value > 80:
+            color = "#FF3333"
+        elif value > 60:
+            color = "#FFAA33"
+        else:
+            color = "#33FF33"
+        
+        # Animated fill
+        for i in range(width):
+            if i < filled:
+                # Slight animation on the edge
+                if i == filled - 1:
+                    pulse = PULSE_FRAMES[self.frame % len(PULSE_FRAMES)]
+                    text.append(pulse, style=color)
+                else:
+                    text.append("█", style=color)
+            else:
+                text.append("░", style="#333333")
+        
+        return text
+
+    def render_live_activity_panel(self) -> Text:
+        """Render live activity panel with blinkenlights for Kontrollrummet"""
+        text = Text()
+        
+        # Current time with animated clock
+        clock = CLOCK_FRAMES[self.frame % len(CLOCK_FRAMES)]
+        current_time = time.strftime('%H:%M:%S')
+        text.append(f"{clock} ", style="#444444")
+        text.append(f"{current_time}\n\n", style="bold #000000")
+        
+        # Mini activity indicators (blinkenlights row)
+        text.append("AKTIVITET ", style="bold #666666")
+        for i in range(12):
+            # Each light pulses at different phase
+            phase = (self.frame + i * 7) % 20
+            if phase < 3:
+                text.append("●", style=LED_COLORS[i % len(LED_COLORS)])
+            elif phase < 6:
+                text.append("◐", style=LED_COLORS[i % len(LED_COLORS)])
+            else:
+                text.append("○", style="#333333")
+        text.append("\n\n")
+        
+        # Quick stats with animations
+        health_data = self._load_health_data()
+        metrics = self._get_cluster_metrics()
+        
+        # Nodes with heartbeat
+        nodes_ready = health_data.get("nodes_ready", metrics.get("nodes_ready", 0))
+        nodes_total = health_data.get("nodes_total", metrics.get("nodes_total", 0))
+        heart = HEART_FRAMES[self.frame % len(HEART_FRAMES)]
+        text.append(f"{heart} Noder: ", style="#FF6699")
+        text.append(f"{nodes_ready}/{nodes_total}\n", style="bold #000000")
+        
+        # Pods with pulse
+        pods_running = health_data.get("pods_running", 0)
+        pods_total = health_data.get("pods_total", 0)
+        pulse = PULSE_FRAMES[self.frame % len(PULSE_FRAMES)]
+        text.append(f"{pulse} Poddar: ", style="#33FF33")
+        text.append(f"{pods_running}", style="bold #000000")
+        if pods_total > 0:
+            text.append(f"/{pods_total}", style="#666666")
+        text.append("\n")
+        
+        # CPU mini-bar
+        cpu = health_data.get("cpu_usage", metrics.get("cpu_usage", 0))
+        cpu_icon = FIRE_FRAMES[self.frame % len(FIRE_FRAMES)] if cpu > 70 else "◆"
+        text.append(f"{cpu_icon} CPU: ", style="#FF9933" if cpu > 70 else "#33AAFF")
+        mini_bar = self._mini_bar(cpu, 10)
+        text.append(mini_bar)
+        text.append(f" {cpu:.0f}%\n", style="#000000")
+        
+        # Memory mini-bar
+        mem = health_data.get("memory_usage", metrics.get("memory_usage", 0))
+        mem_icon = "◆"
+        text.append(f"{mem_icon} Minne: ", style="#AA33FF")
+        mini_bar = self._mini_bar(mem, 10)
+        text.append(mini_bar)
+        text.append(f" {mem:.0f}%\n", style="#000000")
+        
+        # Current page indicator
+        text.append("\n")
+        num_pages = 8
+        current_page = (self.frame // 40) % num_pages
+        page_names = ["Status", "Poddar", "Nätverk", "Lagring", "NS", "Test", "VMs", "Vitals"]
+        
+        for i in range(num_pages):
+            if i == current_page:
+                text.append(f"●", style="#33FF33")
+            else:
+                text.append(f"○", style="#444444")
+        text.append(f" {page_names[current_page]}\n", style="#666666")
+        
+        # Wave animation at bottom
+        text.append("\n")
+        for i in range(25):
+            wave_char = WAVE_FRAMES[(self.frame + i * 2) % len(WAVE_FRAMES)]
+            # Rainbow colors
+            colors = ["#FF3333", "#FF9933", "#FFFF33", "#33FF33", "#33FFFF", "#3333FF", "#9933FF"]
+            text.append(wave_char, style=colors[i % len(colors)])
+        
+        return text
+
+    def _mini_bar(self, value: float, width: int) -> Text:
+        """Render a mini progress bar"""
+        text = Text()
+        filled = int((value / 100) * width)
+        
+        if value > 80:
+            color = "#FF3333"
+        elif value > 60:
+            color = "#FFAA33"
+        else:
+            color = "#33FF33"
+        
+        text.append("▓" * filled, style=color)
+        text.append("░" * (width - filled), style="#333333")
+        return text
 
     def render_celebration(self) -> Text:
         """Render completion status (simple, readable)."""
@@ -2587,24 +3070,13 @@ class ClusterDashboard:
             # Show rotating pages on left (main content)
             layout["health"].update(page_widget)
             
-            # Show completion stats on right
-            stats_text = Text()
-            elapsed = int(time.time() - self.start_time)
-            mins, secs = divmod(elapsed, 60)
-            stats_text.append("Deployment Stats\n", style="bold #000000")
-            stats_text.append(f"\nTotal time: {mins}m {secs}s\n", style="#000000")
-            stats_text.append(f"Steps completed: {len([s for s in self.steps if s.status == Status.SUCCESS])}/{len(self.steps)}\n", style="#000000")
-            
-            # Test summary if available
-            test_results = self._load_test_results()
-            if test_results and test_results.get("tests"):
-                passed = test_results.get("passed", 0)
-                failed = test_results.get("failed", 0)
-                total = passed + failed
-                stats_text.append(f"Tests: {passed}/{total} passed", style="bold #008800" if failed == 0 else "bold #CC0000")
-            
-            stats_text.append("\n\n(Rotating pages every 5s)", style="#888888")
-            layout["monitoring"].update(Panel(stats_text, border_style="#CCCCCC", style=BG_STYLE, title="📈 Översikt"))
+            # Show live activity panel on right
+            layout["monitoring"].update(Panel(
+                self.render_live_activity_panel(),
+                border_style="#CCCCCC", 
+                style=BG_STYLE, 
+                title="📈 Live Aktivitet"
+            ))
         else:
             # MASKINRUMMET ⚙️ - Deployment in progress
             if self.blinkenlicht:
