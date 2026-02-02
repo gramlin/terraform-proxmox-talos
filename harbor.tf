@@ -183,10 +183,26 @@ data "helm_template" "harbor" {
       type = "RollingUpdate"
     }
 
-    # Node affinity - prefer workers
+    # Node affinity - run all harbor pods on the same worker node (required for RWO PVCs)
     nodeSelector = {}
     tolerations  = []
     affinity = {
+      podAffinity = {
+        requiredDuringSchedulingIgnoredDuringExecution = [
+          {
+            labelSelector = {
+              matchExpressions = [
+                {
+                  key      = "app.kubernetes.io/instance"
+                  operator = "In"
+                  values   = ["harbor"]
+                }
+              ]
+            }
+            topologyKey = "kubernetes.io/hostname"
+          }
+        ]
+      }
       nodeAffinity = {
         preferredDuringSchedulingIgnoredDuringExecution = [
           {
