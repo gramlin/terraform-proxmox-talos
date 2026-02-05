@@ -23,14 +23,15 @@
 #
 set -euo pipefail
 
-# -----------------------------
+# #############################################################################
 # Script directory
-# -----------------------------
+# #############################################################################
 WORKDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# -----------------------------
+# #############################################################################
 # Load configuration
-# -----------------------------
+# #############################################################################
+# Loads configuration: script defaults -> do.cfg -> do.local.cfg overrides. Normalizes booleans and derives paths.
 load_config() {
   # Defaults (before loading config files)
   PROFILE="full"
@@ -130,14 +131,9 @@ load_config() {
   INGRESS_CA_OUT="$WORKDIR/kubernetes-ingress-ca-crt.pem"
   LOG_FILE="$WORKDIR/$LOG_FILE"
   
-  # Legacy variable mappings for compatibility
-  POOL_NAME="$STORAGE_POOL_NAME"
-  STORAGECLASS_NAME="$STORAGE_CLASS_NAME"
-  AUTO_PLACE="$STORAGE_REPLICAS"
-  WAIT_LINSTOR_AVAILABLE_TIMEOUT="$WAIT_LINSTOR_TIMEOUT"
-  WAIT_SATELLITE_PODS_TIMEOUT="$WAIT_SATELLITE_TIMEOUT"
 }
 
+# Converts various boolean representations (true/yes/1/on) to '1', everything else to '0'.
 normalize_bool() {
   local val="${1:-}"
   # Convert to lowercase using tr for bash 3.x compatibility (macOS)
@@ -149,6 +145,7 @@ normalize_bool() {
   esac
 }
 
+# Sets component defaults based on profile name (simple/full/custom).
 apply_profile() {
   # Only apply profile defaults if values are still at script defaults
   # This allows do.cfg to override profile settings
@@ -177,6 +174,7 @@ apply_profile() {
   esac
 }
 
+# Prints the current configuration (profile, components, network, storage, versions) as a formatted table.
 show_config() {
   step "Current Configuration"
   echo ""
@@ -207,15 +205,18 @@ show_config() {
   echo ""
 }
 
+# Converts '1' to 'enabled', anything else to 'disabled'. Used by show_config().
 bool_to_word() {
   [[ "$1" == "1" ]] && echo "enabled" || echo "disabled"
 }
 
-# -----------------------------
+# #############################################################################
 # Pretty logging & progress
-# -----------------------------
+# #############################################################################
+# Returns a timestamp string in YYYY-MM-DD HH:MM:SS format.
 ts() { date +"%Y-%m-%d %H:%M:%S"; }
 
+# Prints a message to stdout. Optionally appends to log file when LOG_ENABLED=1.
 _log() {
   local msg="$1"
   echo "$msg"
@@ -224,6 +225,7 @@ _log() {
   fi
 }
 
+# Same as _log() but outputs to stderr.
 _log_err() {
   local msg="$1"
   echo "$msg" >&2
@@ -236,6 +238,7 @@ _log_err() {
 DASHBOARD_STATUS_FILE="${WORKDIR}/.dashboard-status.json"
 
 # Update dashboard with current step
+# Writes current deployment step status to .dashboard-status.json for the TUI dashboard.
 update_dashboard_step() {
   local step_name="$1"
   local step_status="${2:-running}"  # running, complete, failed
@@ -252,6 +255,7 @@ update_dashboard_step() {
   fi
 }
 
+# Marks the beginning of a new deployment phase. Updates dashboard status.
 step() { 
   # Mark previous step as complete if there was one
   if [[ -n "${CURRENT_STEP:-}" ]]; then
@@ -263,6 +267,7 @@ step() {
   update_dashboard_step "$*" "running"
 }
 
+# Explicitly marks the current step as complete in the dashboard.
 step_done() {
   # Mark current step as complete
   if [[ -n "${CURRENT_STEP:-}" ]]; then
@@ -270,8 +275,11 @@ step_done() {
   fi
 }
 
+# Logs an INFO message to stdout.
 info() { _log "INFO: $*"; }
+# Logs a WARN message to stderr.
 warn() { _log_err "WARN: $*"; }
+# Logs an error, updates dashboard status, and exits with code 1.
 die() { 
   _log_err "ERROR: $*"
   update_dashboard_step "${CURRENT_STEP:-ERROR}" "failed" "$*"
@@ -280,6 +288,7 @@ die() {
 
 # Progress spinner
 SPINNER_PID=""
+# Starts a background spinner animation using Unicode braille characters.
 spinner_start() {
   local msg="${1:-Working...}"
   (
@@ -294,6 +303,7 @@ spinner_start() {
   disown
 }
 
+# Stops the background spinner process.
 spinner_stop() {
   if [[ -n "$SPINNER_PID" ]]; then
     kill "$SPINNER_PID" 2>/dev/null || true
@@ -302,11 +312,15 @@ spinner_stop() {
   fi
 }
 
+# Inline progress display: shows an arrow indicator with message.
 progress() { printf "\r\033[K  → %s" "$*"; }
+# Inline progress display: shows a checkmark with message.
 progress_done() { printf "\r\033[K  ✓ %s\n" "$*"; }
+# Inline progress display: shows a cross with message.
 progress_fail() { printf "\r\033[K  ✗ %s\n" "$*"; }
 
 # Fix stuck PVC with mount failures (LINSTOR CSI bug workaround)
+# Detects and fixes LINSTOR CSI PVCs stuck with filesystem corruption. 5-step recovery with max 3 attempts per PVC.
 fix_stuck_pvc_mount() {
   local ns="$1"
   local pvc_name="$2"
@@ -422,6 +436,7 @@ fix_stuck_pvc_mount() {
   return 0
 }
 
+# Generic wait loop: calls check_cmd repeatedly until success or timeout. Shows progress indicator.
 wait_progress() {
   local msg="$1"
   local timeout="$2"
@@ -448,6 +463,7 @@ wait_progress() {
 }
 
 # Wait for all pods in a namespace to be ready (no timeout)
+# Waits for all pods in a namespace to reach Ready state with real-time status display and automatic PVC fix.
 wait_pods_ready() {
   local ns="$1"
   local label="${2:-}"
@@ -782,6 +798,7 @@ wait_pods_ready() {
 }
 
 # Helm install/upgrade without timeout, with progress
+# Installs or upgrades a Helm chart (auto-detects install vs upgrade), then waits for pods.
 helm_deploy() {
   local release="$1"
   local chart="$2"
@@ -808,6 +825,7 @@ helm_deploy() {
   wait_pods_ready "$ns"
 }
 
+# Shows a one-line summary of pod states (running/pending/failed) for a namespace.
 show_pod_progress() {
   local ns="${1:-piraeus-datastore}"
   local label="${2:-}"
@@ -829,13 +847,15 @@ show_pod_progress() {
   fi
 }
 
+# Asserts that a required CLI tool is installed. Dies with error if not found.
 need() {
   command -v "$1" >/dev/null 2>&1 || die "Missing dependency: $1"
 }
 
-# -----------------------------
+# #############################################################################
 # Terraform helpers
-# -----------------------------
+# #############################################################################
+# Constructs the correct -var-file=... argument for terraform commands.
 terraform_var_file_args() {
   local args=()
   if [[ -n "${TF_VAR_FILE:-}" ]]; then
@@ -848,12 +868,14 @@ terraform_var_file_args() {
   printf "%q " "${args[@]}"
 }
 
+# Runs 'terraform init -upgrade' in the workspace directory.
 terraform_init() {
   need terraform
   step "terraform init"
   ( cd "$WORKDIR" && terraform init -upgrade )
 }
 
+# Runs 'terraform plan' and saves the plan to tfplan file.
 terraform_plan() {
   need terraform
   step "terraform plan"
@@ -864,6 +886,7 @@ terraform_plan() {
 }
 
 # Initialize all dashboard status files (call at start of any command)
+# Clears all JSON status files used by the TUI dashboard.
 init_dashboard_status() {
   # Set file paths using current WORKDIR
   export TF_RESOURCES_FILE="${WORKDIR}/.tf-resources.json"
@@ -887,6 +910,7 @@ init_dashboard_status() {
 }
 
 # Initialize terraform resources tracking
+# Initializes the terraform resources tracking JSON file.
 init_tf_resources() {
   export TF_RESOURCES_FILE="${WORKDIR}/.tf-resources.json"
   echo '{"resources":[],"status":"running","timestamp":"'$(date -Iseconds)'"}' > "$TF_RESOURCES_FILE"
@@ -894,12 +918,14 @@ init_tf_resources() {
 }
 
 # Initialize proxmox status tracking
+# Initializes the Proxmox VM status JSON file.
 init_proxmox_status() {
   PROXMOX_STATUS_FILE="${WORKDIR}/.proxmox-status.json"
   echo '{"vms":[],"status":"idle","timestamp":"'$(date -Iseconds)'"}' > "$PROXMOX_STATUS_FILE"
 }
 
 # Query Proxmox API for VM status
+# Queries the Proxmox API for VM list on the configured node using API token auth.
 query_proxmox_vms() {
   local endpoint="${PROXMOX_VE_ENDPOINT:-}"
   local token="${PROXMOX_VE_API_TOKEN:-}"
@@ -919,6 +945,7 @@ query_proxmox_vms() {
 }
 
 # Update Proxmox VM status for dashboard
+# Queries Proxmox API and writes VM status (CPU, memory, uptime) to .proxmox-status.json.
 update_proxmox_status() {
   local endpoint="${PROXMOX_VE_ENDPOINT:-}"
   local token="${PROXMOX_VE_API_TOKEN:-}"
@@ -963,6 +990,7 @@ update_proxmox_status() {
 }
 
 # Background task to continuously update Proxmox status
+# Starts a background loop that calls update_proxmox_status() every 5 seconds.
 start_proxmox_monitor() {
   (
     while true; do
@@ -973,16 +1001,19 @@ start_proxmox_monitor() {
   PROXMOX_MONITOR_PID=$!
 }
 
+# Stops the background Proxmox monitoring loop.
 stop_proxmox_monitor() {
   [[ -n "${PROXMOX_MONITOR_PID:-}" ]] && kill "$PROXMOX_MONITOR_PID" 2>/dev/null || true
 }
 
 # Initialize talos status tracking
+# Initializes the Talos operations tracking JSON file.
 init_talos_status() {
   echo '{"operations":[],"status":"idle","timestamp":"'$(date -Iseconds)'"}' > "$TALOS_STATUS_FILE"
 }
 
 # Update talos operation status
+# Updates Talos operation status in .talos-status.json via jq upsert.
 update_talos_status() {
   local name="$1"
   local action="$2"  # checking, bootstrapping, configuring, complete, failed
@@ -1004,11 +1035,13 @@ update_talos_status() {
 }
 
 # Initialize linstor status tracking
+# Initializes the LINSTOR operations tracking JSON file.
 init_linstor_status() {
   echo '{"operations":[],"status":"idle","timestamp":"'$(date -Iseconds)'"}' > "$LINSTOR_STATUS_FILE"
 }
 
 # Update linstor operation status
+# Updates LINSTOR operation status in .linstor-status.json via jq upsert.
 update_linstor_status() {
   local name="$1"
   local action="$2"  # creating, waiting, configuring, complete, failed
@@ -1029,6 +1062,7 @@ update_linstor_status() {
 }
 
 # Update a terraform resource status
+# Updates terraform resource status in .tf-resources.json for dashboard display.
 update_tf_resource() {
   local name="$1"
   local action="$2"  # creating, modifying, destroying, complete, failed
@@ -1061,6 +1095,7 @@ update_tf_resource() {
 }
 
 # Parse terraform output and track resources
+# Reads terraform output line by line, parses resource actions, tracks via dashboard, abbreviates names.
 tf_abbrev_and_track() {
   local line name action elapsed
   # Debug: log to temp file to verify function is called
@@ -1106,6 +1141,7 @@ tf_abbrev_and_track() {
 }
 
 # Abbreviate long terraform resource names in output for readability
+# Standalone sed filter to abbreviate terraform resource names (e.g., proxmox_virtual_environment_vm -> vm:).
 tf_abbrev() {
   sed -E \
     -e 's/null_resource\.cluster_health_checks/health/g' \
@@ -1123,6 +1159,7 @@ tf_abbrev() {
     -e 's/\(local-exec\):/»/g'
 }
 
+# Runs 'terraform apply -auto-approve', optionally from a saved plan file. Tracks resources via dashboard.
 terraform_apply() {
   need terraform
   local var_args; var_args="$(terraform_var_file_args)"
@@ -1141,6 +1178,7 @@ terraform_apply() {
   fi
 }
 
+# Runs 'terraform destroy -auto-approve' with var file args.
 terraform_destroy() {
   need terraform
   step "terraform destroy"
@@ -1149,18 +1187,20 @@ terraform_destroy() {
   ( cd "$WORKDIR" && terraform destroy -auto-approve ${var_args} )
 }
 
-# -----------------------------
+# #############################################################################
 # Terraform output parsing
-# -----------------------------
+# #############################################################################
 CONTROLLER_NODE_NAMES=()
 CONTROLLERS=()
 WORKER_NODE_NAMES=()
 WORKERS=()
 
+# Reads a single terraform output value. Returns empty string on failure.
 tf_out_raw() {
   ( cd "$WORKDIR" && terraform output -raw "$1" 2>/dev/null || true )
 }
 
+# Cleans a terraform list output (replaces newlines/commas with spaces, trims).
 normalize_tf_list() {
   local s="${1:-}"
   s="${s//$'\n'/ }"
@@ -1168,6 +1208,7 @@ normalize_tf_list() {
   echo "$s" | xargs
 }
 
+# Reads controller/worker node names and IPs from terraform outputs into global arrays.
 load_cluster_vars() {
   step "read terraform outputs"
   local cnames cips wnames wips
@@ -1193,9 +1234,10 @@ load_cluster_vars() {
   info "workers:     ${WORKERS[*]}"
 }
 
-# -----------------------------
+# #############################################################################
 # Config writing
-# -----------------------------
+# #############################################################################
+# Exports talosconfig.yml and kubeconfig.yml from terraform outputs. Sets permissions to 0600.
 write_configs() {
   need terraform
   need kubectl
@@ -1219,6 +1261,7 @@ write_configs() {
   info "talosconfig: $TALOSCONFIG_OUT"
 }
 
+# Runs 'talosctl health' to verify the Talos cluster is healthy. Handles version differences.
 talos_health() {
   need talosctl
   need kubectl
@@ -1255,6 +1298,7 @@ talos_health() {
   fi
 }
 
+# Sets KUBECONFIG env var to the first available kubeconfig file. Returns 1 if none exists.
 ensure_kubeconfig() {
   if [[ -n "${KUBECONFIG:-}" && -f "${KUBECONFIG:-}" ]]; then
     return 0
@@ -1270,9 +1314,10 @@ ensure_kubeconfig() {
   return 1
 }
 
-# -----------------------------
+# #############################################################################
 # Disk helpers
-# -----------------------------
+# #############################################################################
+# Returns the data disk device path for a worker node. Supports per-node overrides via DEVICE_MAP.
 device_for_node() {
   local node="$1"
   if [[ -n "$DEVICE_MAP" ]]; then
@@ -1287,11 +1332,13 @@ device_for_node() {
   echo "$DEFAULT_DEVICE"
 }
 
+# Strips /dev/ prefix from a device path to get the disk identifier.
 disk_id_from_device() {
   local dev="$1"
   echo "${dev#/dev/}"
 }
 
+# Verifies every worker node has the expected data disk via talosctl get disks.
 validate_worker_data_disks() {
   [[ "${#WORKERS[@]}" -gt 0 ]] || return 0
   need talosctl
@@ -1312,6 +1359,7 @@ validate_worker_data_disks() {
   done
 }
 
+# Wipes every worker node's data disk via talosctl when WIPE_DISKS=1.
 wipe_worker_disks() {
   [[ "$WIPE_DISKS" == "1" ]] || return 0
   [[ "${#WORKERS[@]}" -gt 0 ]] || return 0
@@ -1331,9 +1379,10 @@ wipe_worker_disks() {
   done
 }
 
-# -----------------------------
+# #############################################################################
 # Validation tests
-# -----------------------------
+# #############################################################################
+# Checks /proc/modules on each worker for loaded drbd kernel module.
 test_drbd_modules_loaded() {
   step "TEST: Verify DRBD modules on worker nodes"
   [[ "${#WORKERS[@]}" -gt 0 ]] || { info "No workers to test"; return 0; }
@@ -1356,6 +1405,7 @@ test_drbd_modules_loaded() {
   return 0
 }
 
+# Verifies the LVM init DaemonSet has all pods in ready state.
 test_lvm_init_daemonset() {
   step "TEST: Verify LVM init DaemonSet"
   
@@ -1371,6 +1421,7 @@ test_lvm_init_daemonset() {
   return 0
 }
 
+# Checks that all LINSTOR satellite pods are Running and Ready.
 test_satellite_readiness() {
   step "TEST: Verify satellite pod status"
   
@@ -1399,6 +1450,7 @@ test_satellite_readiness() {
   fi
 }
 
+# Uses linstor node list to verify all expected nodes are registered as SATELLITE (300s timeout).
 test_linstor_nodes_registered() {
   step "TEST: Verify LINSTOR nodes registered"
   
@@ -1441,6 +1493,7 @@ test_linstor_nodes_registered() {
   done
 }
 
+# Checks for LVM storage pools via linstor storage-pool list.
 test_storage_pools_created() {
   step "TEST: Verify storage pools created"
   
@@ -1469,11 +1522,13 @@ test_storage_pools_created() {
 TEST_RESULTS_FILE="$WORKDIR/.test-results.json"
 
 # Initialize test results
+# Initializes JSON-based test result tracking for dashboard display.
 init_test_results() {
   echo '{"tests":[],"timestamp":"'$(date -Iseconds)'","status":"running"}' > "$TEST_RESULTS_FILE"
 }
 
 # Add test result
+# Adds a single test result entry to .test-results.json.
 add_test_result() {
   local category="$1"
   local name="$2"
@@ -1492,6 +1547,7 @@ add_test_result() {
 }
 
 # Finalize test results
+# Finalizes test results with pass/fail summary counts.
 finalize_test_results() {
   local passed=$1
   local failed=$2
@@ -1503,6 +1559,7 @@ finalize_test_results() {
 
 # ==================== BASIC TESTS ====================
 
+# Verifies kubectl cluster-info succeeds.
 test_kubectl_connectivity() {
   local start=$(date +%s)
   if kubectl cluster-info &>/dev/null; then
@@ -1517,6 +1574,7 @@ test_kubectl_connectivity() {
   fi
 }
 
+# Checks all nodes have Ready=True condition.
 test_all_nodes_ready() {
   local start=$(date +%s)
   local nodes_json=$(kubectl get nodes -o json 2>/dev/null)
@@ -1535,6 +1593,7 @@ test_all_nodes_ready() {
   fi
 }
 
+# Verifies CoreDNS pods are running in kube-system.
 test_coredns_running() {
   local start=$(date +%s)
   local pods=$(kubectl get pods -n kube-system -l k8s-app=kube-dns -o json 2>/dev/null)
@@ -1552,6 +1611,7 @@ test_coredns_running() {
   fi
 }
 
+# Spawns a busybox pod to resolve kubernetes.default.svc.cluster.local.
 test_dns_resolution() {
   local start=$(date +%s)
   if kubectl run dns-test --image=busybox:1.36 --restart=Never --rm -i --timeout=30s \
@@ -1568,6 +1628,7 @@ test_dns_resolution() {
   fi
 }
 
+# Checks talosctl version succeeds with the current talosconfig.
 test_talos_api() {
   local start=$(date +%s)
   if [[ -f "${TALOSCONFIG:-$TALOSCONFIG_OUT}" ]] && talosctl version &>/dev/null; then
@@ -1583,6 +1644,7 @@ test_talos_api() {
   fi
 }
 
+# Runs talosctl etcd status and looks for HEALTHY output.
 test_etcd_health() {
   local start=$(date +%s)
   if [[ -f "${TALOSCONFIG:-$TALOSCONFIG_OUT}" ]]; then
@@ -1601,6 +1663,7 @@ test_etcd_health() {
   return 1
 }
 
+# Checks that at least 5 Talos services report Running.
 test_talos_services() {
   local start=$(date +%s)
   if [[ -f "${TALOSCONFIG:-$TALOSCONFIG_OUT}" ]]; then
@@ -1621,6 +1684,7 @@ test_talos_services() {
 
 # ==================== NETWORK TESTS ====================
 
+# Runs cilium status and checks for OK.
 test_cilium_status() {
   local start=$(date +%s)
   if command -v cilium &>/dev/null; then
@@ -1638,6 +1702,7 @@ test_cilium_status() {
   return 1
 }
 
+# Creates 2 busybox pods and pings between them to verify pod-to-pod networking.
 test_pod_networking() {
   local start=$(date +%s)
   # Create test pods and verify they can communicate
@@ -1669,6 +1734,7 @@ test_pod_networking() {
   return 1
 }
 
+# Verifies the default kubernetes ClusterIP service exists.
 test_service_networking() {
   local start=$(date +%s)
   # Test ClusterIP service connectivity
@@ -1683,6 +1749,7 @@ test_service_networking() {
   return 1
 }
 
+# Checks that at least one LoadBalancer service has an assigned IP.
 test_loadbalancer() {
   local start=$(date +%s)
   local lb_svcs=$(kubectl get svc -A -o json | jq '[.items[] | select(.spec.type=="LoadBalancer" and .status.loadBalancer.ingress)] | length')
@@ -1701,6 +1768,7 @@ test_loadbalancer() {
 
 # ==================== STORAGE TESTS ====================
 
+# Verifies the LINSTOR StorageClass exists.
 test_storageclass_exists() {
   local start=$(date +%s)
   if kubectl get sc linstor-lvm-r1 &>/dev/null; then
@@ -1714,6 +1782,7 @@ test_storageclass_exists() {
   return 1
 }
 
+# Creates a 1Gi test PVC and waits for it to become Bound.
 test_pvc_provisioning() {
   local start=$(date +%s)
   # Create test PVC
@@ -1752,6 +1821,7 @@ EOF
   return 1
 }
 
+# Creates a test PVC + pod, writes a file to the volume, and verifies it succeeds.
 test_volume_mount() {
   local start=$(date +%s)
   kubectl delete pod test-volume-mount --ignore-not-found=true &>/dev/null || true
@@ -1814,6 +1884,7 @@ EOF
 
 # ==================== APP TESTS ====================
 
+# Checks pod readiness in harbor namespace. Skips if not installed.
 test_harbor_health() {
   local start=$(date +%s)
   if [[ "$INSTALL_HARBOR" != "true" ]]; then
@@ -1836,6 +1907,7 @@ test_harbor_health() {
   fi
 }
 
+# Checks pod readiness in monitoring namespace. Skips if not installed.
 test_monitoring_health() {
   local start=$(date +%s)
   if [[ "$INSTALL_MONITORING" != "true" ]]; then
@@ -1858,6 +1930,7 @@ test_monitoring_health() {
   fi
 }
 
+# Checks pod readiness in gitea namespace. Skips if not installed.
 test_gitea_health() {
   local start=$(date +%s)
   if [[ "$INSTALL_GITEA" != "true" ]]; then
@@ -1880,6 +1953,7 @@ test_gitea_health() {
   fi
 }
 
+# Checks Traefik pods are running.
 test_traefik_health() {
   local start=$(date +%s)
   local ready=$(kubectl get pods -n traefik -l app.kubernetes.io/name=traefik -o json 2>/dev/null | jq '[.items[] | select(.status.phase=="Running")] | length')
@@ -1896,6 +1970,7 @@ test_traefik_health() {
   fi
 }
 
+# Curls the Traefik LoadBalancer IP to verify ingress is reachable.
 test_ingress_connectivity() {
   local start=$(date +%s)
   local lb_ip=$(kubectl get svc -n traefik traefik -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "")
@@ -1915,6 +1990,7 @@ test_ingress_connectivity() {
   return 1
 }
 
+# Orchestrates all test functions grouped by category. Tracks pass/fail and generates summary.
 run_all_tests() {
   step "Running validation tests"
   
@@ -1985,9 +2061,10 @@ run_all_tests() {
   fi
 }
 
-# -----------------------------
+# #############################################################################
 # Piraeus/LINSTOR install
-# -----------------------------
+# #############################################################################
+# Spawns a busybox pod to test internet connectivity to quay.io.
 check_cluster_network_access() {
   step "verify cluster internet access"
   
@@ -2013,6 +2090,7 @@ check_cluster_network_access() {
   fi
 }
 
+# Applies the Piraeus operator kustomize manifests from GitHub.
 piraeus_install_operator() {
   need kubectl
   init_linstor_status
@@ -2022,6 +2100,7 @@ piraeus_install_operator() {
   update_linstor_status "operator" "complete" "Manifests applied"
 }
 
+# Waits for Piraeus controller-manager and gencert deployments to roll out (10m timeout).
 piraeus_wait_operator() {
   step "piraeus wait operator"
   update_linstor_status "controller-manager" "waiting" "Waiting for rollout"
@@ -2032,6 +2111,7 @@ piraeus_wait_operator() {
   update_linstor_status "gencert" "complete" "Ready"
 }
 
+# Patches all webhook failurePolicy fields to Ignore to prevent blocking (retries 5 times).
 piraeus_relax_webhooks() {
   step "piraeus relax webhook failure policy"
   local wh="piraeus-operator-validating-webhook-configuration"
@@ -2048,6 +2128,7 @@ piraeus_relax_webhooks() {
   done
 }
 
+# Generates a LinstorSatelliteConfiguration YAML for Talos Linux (DRBD + LVM dirs).
 render_storage_pool_configs() {
   cat <<'YAML'
 apiVersion: piraeus.io/v1
@@ -2084,6 +2165,7 @@ spec:
 YAML
 }
 
+# Generates a LinstorCluster YAML manifest. Handles operator version differences.
 render_linstorcluster() {
   local operator_major_minor
   operator_major_minor="$(echo "$PIRAEUS_OPERATOR_VERSION" | cut -d. -f1-2)"
@@ -2125,16 +2207,17 @@ YAML
   fi
 }
 
+# Generates a StorageClass YAML for LINSTOR with configurable pool, replicas, and binding mode.
 render_storageclass() {
   cat <<YAML
 apiVersion: storage.k8s.io/v1
 kind: StorageClass
 metadata:
-  name: ${STORAGECLASS_NAME}
+  name: ${STORAGE_CLASS_NAME}
 provisioner: linstor.csi.linbit.com
 parameters:
-  linstor.csi.linbit.com/storagePool: ${POOL_NAME}
-  linstor.csi.linbit.com/autoPlace: "${AUTO_PLACE}"
+  linstor.csi.linbit.com/storagePool: ${STORAGE_POOL_NAME}
+  linstor.csi.linbit.com/autoPlace: "${STORAGE_REPLICAS}"
   csi.storage.k8s.io/fstype: ext4
 allowVolumeExpansion: true
 reclaimPolicy: Delete
@@ -2142,6 +2225,7 @@ volumeBindingMode: WaitForFirstConsumer
 YAML
 }
 
+# Generates a DaemonSet that initializes LVM thin pools on worker nodes (pvcreate/vgcreate/lvcreate).
 render_lvm_init_daemonset() {
   cat <<YAML
 apiVersion: apps/v1
@@ -2185,7 +2269,7 @@ spec:
               set -e
               DEVICE="${DEFAULT_DEVICE}"
               VG_NAME="linstor-vg"
-              POOL_NAME="${STORAGE_POOL_NAME}"
+              STORAGE_POOL_NAME="${STORAGE_POOL_NAME}"
               HOSTNAME=\$(hostname)
               
               echo "LVM Init: Starting on \$HOSTNAME"
@@ -2205,11 +2289,11 @@ spec:
                 vgcreate "\$VG_NAME" "\$DEVICE"
               fi
               
-              if ! lvdisplay "\$VG_NAME/\$POOL_NAME" >/dev/null 2>&1; then
-                lvcreate -l 100%FREE -T "\$VG_NAME/\$POOL_NAME"
+              if ! lvdisplay "\$VG_NAME/\$STORAGE_POOL_NAME" >/dev/null 2>&1; then
+                lvcreate -l 100%FREE -T "\$VG_NAME/\$STORAGE_POOL_NAME"
               fi
               
-              lvchange -ay "\$VG_NAME/\$POOL_NAME" 2>&1 || true
+              lvchange -ay "\$VG_NAME/\$STORAGE_POOL_NAME" 2>&1 || true
               
               echo "LVM Init: Complete on \$HOSTNAME"
               pvs && vgs && lvs
@@ -2227,6 +2311,7 @@ spec:
 YAML
 }
 
+# Applies all LINSTOR resources: LVM init DaemonSet, storage pool config, cluster, StorageClass.
 piraeus_apply_cluster_resources() {
   step "piraeus configure"
   update_linstor_status "lvm-init" "creating" "DaemonSet"
@@ -2240,6 +2325,7 @@ piraeus_apply_cluster_resources() {
   update_linstor_status "resources" "complete" "Applied"
 }
 
+# Clears LINSTOR DB migration state by deleting backup secrets and migration CRs.
 reset_linstor_db_migration() {
   step "reset LINSTOR DB migration state"
   update_linstor_status "db-reset" "running" "Clearing DB"
@@ -2250,6 +2336,7 @@ reset_linstor_db_migration() {
   update_linstor_status "db-reset" "complete" "Reset done"
 }
 
+# Waits up to 15 minutes for LinstorCluster to report Available=True with live status display.
 wait_linstor_ready() {
   step "piraeus wait datastore"
   update_linstor_status "linstor-controller" "waiting" "Starting"
@@ -2311,11 +2398,12 @@ wait_linstor_ready() {
   die "LinstorCluster/linstor not Available"
 }
 
+# Waits for LINSTOR satellite pods to become Ready (configurable timeout).
 wait_satellites_ready() {
   step "piraeus wait satellites"
   update_linstor_status "satellite-pods" "waiting" "Waiting for Ready"
   
-  if kubectl -n piraeus-datastore wait pod -l app.kubernetes.io/component=linstor-satellite --for=condition=Ready --timeout="$WAIT_SATELLITE_PODS_TIMEOUT" 2>/dev/null; then
+  if kubectl -n piraeus-datastore wait pod -l app.kubernetes.io/component=linstor-satellite --for=condition=Ready --timeout="$WAIT_SATELLITE_TIMEOUT" 2>/dev/null; then
     info "✓ Satellites are Ready"
     update_linstor_status "satellite-pods" "complete" "All ready"
     return 0
@@ -2326,6 +2414,7 @@ wait_satellites_ready() {
   return 0
 }
 
+# Creates LVM thin storage pools on each worker node via linstor storage-pool create.
 configure_linstor_storage_pools() {
   [[ "${#WORKER_NODE_NAMES[@]}" -gt 0 ]] || return 0
   need kubectl
@@ -2381,20 +2470,21 @@ configure_linstor_storage_pools() {
     
     # Check if storage pool already exists
     if kubectl -n piraeus-datastore exec "$linstor_pod" -- linstor storage-pool list -p 2>/dev/null | \
-       grep -q "^${node}|${POOL_NAME}|"; then
-      info "✓ Storage pool '${POOL_NAME}' already exists on $node"
+       grep -q "^${node}|${STORAGE_POOL_NAME}|"; then
+      info "✓ Storage pool '${STORAGE_POOL_NAME}' already exists on $node"
       continue
     fi
     
     info "Creating storage pool on $node..."
     kubectl -n piraeus-datastore exec "$linstor_pod" -- linstor \
-      storage-pool create lvmthin "$node" "${POOL_NAME}" "linstor-vg/${POOL_NAME}" 2>&1 || true
+      storage-pool create lvmthin "$node" "${STORAGE_POOL_NAME}" "linstor-vg/${STORAGE_POOL_NAME}" 2>&1 || true
   done
   
   info "Storage pools configured"
   kubectl -n piraeus-datastore exec "$linstor_pod" -- linstor storage-pool list 2>&1 || true
 }
 
+# Creates a temporary namespace with PVC + pod to verify LINSTOR storage works end-to-end.
 storage_smoke_test() {
   step "linstor pvc smoke test"
   local ns="linstor-smoke"
@@ -2410,7 +2500,7 @@ spec:
   resources:
     requests:
       storage: 1Gi
-  storageClassName: ${STORAGECLASS_NAME}
+  storageClassName: ${STORAGE_CLASS_NAME}
 ---
 apiVersion: v1
 kind: Pod
@@ -2443,6 +2533,7 @@ YAML
   info "LINSTOR smoke test OK"
 }
 
+# Exports the Kubernetes ingress CA certificate from kube-system to a local PEM file.
 export_ingress_ca() {
   step "export kubernetes ingress ca"
   local secret="kubernetes-ingress-ca"
@@ -2454,9 +2545,10 @@ export_ingress_ca() {
   fi
 }
 
-# -----------------------------
+# #############################################################################
 # Clean - remove all components for fresh start
-# -----------------------------
+# #############################################################################
+# Comprehensive cleanup: removes all Helm releases, PVCs, LINSTOR resources, CRDs, and namespaces.
 cmd_clean() {
   step "clean - removing all deployed components"
   
@@ -2491,7 +2583,7 @@ cmd_clean() {
     kubectl delete linstorsatelliteconfiguration --all --ignore-not-found 2>/dev/null || true
 
     info "Removing StorageClass..."
-    kubectl delete storageclass "$STORAGECLASS_NAME" --ignore-not-found 2>/dev/null || true
+    kubectl delete storageclass "$STORAGE_CLASS_NAME" --ignore-not-found 2>/dev/null || true
 
     info "Removing namespaces..."
     for ns in harbor gitea monitoring traefik piraeus-datastore linstor-smoke cert-manager trust-manager; do
@@ -2512,9 +2604,10 @@ cmd_clean() {
   info "✓ Clean complete - ready for fresh ./do apply"
 }
 
-# -----------------------------
+# #############################################################################
 # Reset helpers
-# -----------------------------
+# #############################################################################
+# Patches finalizers to [] on namespaces stuck in Terminating state.
 strip_finalizers_ns_if_stuck() {
   local ns="$1"
   local phase
@@ -2524,6 +2617,7 @@ strip_finalizers_ns_if_stuck() {
   fi
 }
 
+# Uninstalls Piraeus/LINSTOR: deletes StorageClass, CRs, namespace, and operator manifests.
 cmd_reset_piraeus() {
   need kubectl
   ensure_kubeconfig || die "No kubeconfig found"
@@ -2531,7 +2625,7 @@ cmd_reset_piraeus() {
   step "reset piraeus/linstor"
   
   kubectl delete ns linstor-smoke --ignore-not-found --timeout=2m >/dev/null 2>&1 || true
-  kubectl delete storageclass "$STORAGECLASS_NAME" --ignore-not-found >/dev/null 2>&1 || true
+  kubectl delete storageclass "$STORAGE_CLASS_NAME" --ignore-not-found >/dev/null 2>&1 || true
   kubectl -n piraeus-datastore delete linstorcluster linstor --ignore-not-found --timeout=3m >/dev/null 2>&1 || true
   kubectl delete linstorsatelliteconfigurations.piraeus.io --all --ignore-not-found >/dev/null 2>&1 || true
   kubectl delete ns piraeus-datastore --ignore-not-found --timeout=5m >/dev/null 2>&1 || true
@@ -2542,6 +2636,7 @@ cmd_reset_piraeus() {
   info "reset-piraeus complete"
 }
 
+# Full reset: runs cmd_reset_piraeus, terraform destroy, removes all generated files.
 cmd_reset_all() {
   step "reset-all"
 
@@ -2564,6 +2659,7 @@ cmd_reset_all() {
   info "reset-all done"
 }
 
+# Runs reset_linstor_db_migration() and shows follow-up instructions.
 cmd_fix_linstor_db() {
   need kubectl
   ensure_kubeconfig || die "No kubeconfig found"
@@ -2576,6 +2672,7 @@ cmd_fix_linstor_db() {
 }
 
 # Write health data for dashboard
+# Collects cluster metrics (nodes, pods, CPU, memory) and writes to .health-data.json.
 write_health_data() {
   local health_file="$WORKDIR/.health-data.json"
   
@@ -2625,6 +2722,7 @@ EOF
 }
 
 # Dashboard command - start in Maskinrummet mode
+# Starts the Python TUI dashboard with real-time cluster status display.
 cmd_dashboard() {
   info "Starting dashboard (Maskinrummet)..."
   
@@ -2654,6 +2752,7 @@ cmd_dashboard() {
 }
 
 # Kontrollrummet - monitoring dashboard mode
+# Starts the Swedish-language Python TUI dashboard (kontrollrummet = control room).
 cmd_kontrollrummet() {
   info "Starting Kontrollrummet (Control Room)..."
   
@@ -2683,6 +2782,7 @@ cmd_kontrollrummet() {
 }
 
 # Generate deployment summary report
+# Generates a comprehensive Markdown deployment report with cluster info, VMs, storage, and resources.
 generate_report() {
   step "Generate deployment summary report"
   
@@ -2826,6 +2926,7 @@ REPORT_EOF
   cat "$report_file"
 }
 
+# Deletes and restarts all LINSTOR satellite pods to force DRBD device recreation.
 cmd_restart_linstor() {
   need kubectl
   ensure_kubeconfig || die "No kubeconfig found"
@@ -2858,6 +2959,7 @@ cmd_restart_linstor() {
   info "LINSTOR satellites restarted. DRBD devices will be recreated."
 }
 
+# Removes PVC fix attempt tracking files from /tmp, resetting the fix counter.
 cmd_clean_pvc_fixes() {
   step "Clean up PVC fix attempt tracking files"
   
@@ -2871,6 +2973,7 @@ cmd_clean_pvc_fixes() {
   info "You can now retry: ./do deploy-monitoring"
 }
 
+# Force-deletes entire piraeus-datastore namespace, StorageClass, and all LINSTOR CRDs.
 cmd_nuke_piraeus() {
   need kubectl
   ensure_kubeconfig || die "No kubeconfig found"
@@ -2882,7 +2985,7 @@ cmd_nuke_piraeus() {
   sleep 3
   strip_finalizers_ns_if_stuck piraeus-datastore
   
-  kubectl delete storageclass "$STORAGECLASS_NAME" --ignore-not-found 2>/dev/null || true
+  kubectl delete storageclass "$STORAGE_CLASS_NAME" --ignore-not-found 2>/dev/null || true
   
   for crd in $(kubectl get crd -o name 2>/dev/null | grep -E 'piraeus|linstor' || true); do
     kubectl patch "$crd" -p '{"metadata":{"finalizers":[]}}' --type=merge 2>/dev/null || true
@@ -2892,9 +2995,10 @@ cmd_nuke_piraeus() {
   info "Piraeus nuked. Run './do apply' to reinstall."
 }
 
-# -----------------------------
+# #############################################################################
 # Traefik Ingress Controller
-# -----------------------------
+# #############################################################################
+# Deploys Traefik via Helm with LoadBalancer, TLS, CRD provider, and cross-namespace support.
 deploy_traefik() {
   step "deploy Traefik ingress controller"
   need kubectl
@@ -2936,9 +3040,10 @@ deploy_traefik() {
   info "Traefik LoadBalancer IP: $lb_ip"
 }
 
-# -----------------------------
+# #############################################################################
 # Configure Central Harbor
-# -----------------------------
+# #############################################################################
+# Creates a docker-registry secret for pulling images from an external Harbor registry.
 configure_central_harbor() {
   info "Configuring cluster to use central Harbor registry at $CENTRAL_HARBOR_URL"
   
@@ -2965,9 +3070,10 @@ configure_central_harbor() {
   info "Central Harbor: https://$CENTRAL_HARBOR_URL"
 }
 
-# -----------------------------
+# #############################################################################
 # Harbor Container Registry
-# -----------------------------
+# #############################################################################
+# Deploys Harbor container registry via Helm with cert-manager TLS and stuck PVC cleanup.
 deploy_harbor() {
   step "deploy Harbor container registry"
   
@@ -3070,20 +3176,20 @@ persistence:
   enabled: true
   persistentVolumeClaim:
     registry:
-      storageClass: "$STORAGECLASS_NAME"
+      storageClass: "$STORAGE_CLASS_NAME"
       size: $HARBOR_REGISTRY_SIZE
     database:
-      storageClass: "$STORAGECLASS_NAME"
+      storageClass: "$STORAGE_CLASS_NAME"
       size: 5Gi
     redis:
-      storageClass: "$STORAGECLASS_NAME"
+      storageClass: "$STORAGE_CLASS_NAME"
       size: 1Gi
     trivy:
-      storageClass: "$STORAGECLASS_NAME"
+      storageClass: "$STORAGE_CLASS_NAME"
       size: 5Gi
     jobservice:
       jobLog:
-        storageClass: "$STORAGECLASS_NAME"
+        storageClass: "$STORAGE_CLASS_NAME"
         size: 1Gi
 # Use Recreate strategy for components with RWO volumes to avoid Multi-Attach errors
 updateStrategy:
@@ -3113,9 +3219,10 @@ YAML
   info "  User: admin / Password: $HARBOR_ADMIN_PASSWORD"
 }
 
-# -----------------------------
+# #############################################################################
 # Monitoring Stack
-# -----------------------------
+# #############################################################################
+# Deploys kube-prometheus-stack (Prometheus + Grafana + Alertmanager) via Helm with storage and ingress.
 deploy_monitoring() {
   step "deploy monitoring stack"
   need kubectl
@@ -3136,17 +3243,17 @@ deploy_monitoring() {
   helm $cmd monitoring prometheus-community/kube-prometheus-stack \
     --namespace "$ns" \
     --version "$MONITORING_VERSION" \
-    --set prometheus.prometheusSpec.storageSpec.volumeClaimTemplate.spec.storageClassName="$STORAGECLASS_NAME" \
+    --set prometheus.prometheusSpec.storageSpec.volumeClaimTemplate.spec.storageClassName="$STORAGE_CLASS_NAME" \
     --set prometheus.prometheusSpec.storageSpec.volumeClaimTemplate.spec.resources.requests.storage="$PROMETHEUS_STORAGE_SIZE" \
     --set prometheus.prometheusSpec.retention="$PROMETHEUS_RETENTION" \
     --set grafana.persistence.enabled=true \
-    --set grafana.persistence.storageClassName="$STORAGECLASS_NAME" \
+    --set grafana.persistence.storageClassName="$STORAGE_CLASS_NAME" \
     --set grafana.persistence.size=5Gi \
     --set grafana.adminPassword="$GRAFANA_ADMIN_PASSWORD" \
     --set grafana.ingress.enabled=true \
     --set grafana.ingress.ingressClassName=traefik \
     --set "grafana.ingress.hosts[0]=$grafana_domain" \
-    --set alertmanager.alertmanagerSpec.storage.volumeClaimTemplate.spec.storageClassName="$STORAGECLASS_NAME" \
+    --set alertmanager.alertmanagerSpec.storage.volumeClaimTemplate.spec.storageClassName="$STORAGE_CLASS_NAME" \
     --set alertmanager.alertmanagerSpec.storage.volumeClaimTemplate.spec.resources.requests.storage=2Gi
 
   # Wait for pods with progress (no timeout)
@@ -3161,6 +3268,7 @@ deploy_monitoring() {
 }
 
 # Setup advanced monitoring (dashboards, alerts, scrape configs)
+# Configures advanced monitoring: scrape configs, PrometheusRule alerts, Grafana dashboards.
 setup_monitoring_advanced() {
   local ns="${1:-monitoring}"
   step "Configure advanced monitoring (dashboards, alerts, scraping)"
@@ -3385,9 +3493,10 @@ DASH_EOF
   info "  4. Configure AlertManager notifications: kubectl edit secret -n monitoring alertmanager-monitoring-kube-prom-alertmanager"
 }
 
-# -----------------------------
+# #############################################################################
 # Gitea
-# -----------------------------
+# #############################################################################
+# Deploys Gitea with sqlite3, memory-based session/cache, orphaned resource cleanup, and Helm adoption.
 deploy_gitea() {
   step "deploy Gitea"
   need kubectl
@@ -3471,9 +3580,10 @@ deploy_gitea() {
   info "  User: gitea_admin / Password: $GITEA_ADMIN_PASSWORD"
 }
 
-# -----------------------------
+# #############################################################################
 # Print access info
-# -----------------------------
+# #############################################################################
+# Prints formatted summary of all cluster access info: kubeconfig, URLs, credentials, DNS setup.
 print_access_info() {
   step "Access Information"
   
@@ -3534,9 +3644,10 @@ print_access_info() {
   echo "=============================================="
 }
 
-# -----------------------------
+# #############################################################################
 # Main pipeline
-# -----------------------------
+# #############################################################################
+# Main deployment orchestration: configs -> health -> disks -> LINSTOR -> ingress -> apps -> tests.
 post_apply_pipeline() {
   need kubectl
   need talosctl
@@ -3614,14 +3725,16 @@ post_apply_pipeline() {
   info "Lens-friendly kubeconfig: $KUBECONFIG_LENS_OUT"
 }
 
-# -----------------------------
+# #############################################################################
 # Commands
-# -----------------------------
+# #############################################################################
+# Runs terraform init + terraform plan.
 cmd_plan() {
   terraform_init
   terraform_plan
 }
 
+# Full deployment: clears tracking, shows config, starts Proxmox monitor, terraform apply, post-pipeline.
 cmd_apply() {
   # Clear previous run tracking to give user clean slate
   info "Clearing previous run tracking files..."
@@ -3659,6 +3772,7 @@ cmd_apply() {
   post_apply_pipeline
 }
 
+# Runs terraform plan + apply from saved plan + post_apply_pipeline().
 cmd_plan_apply() {
   show_config
   
@@ -3674,11 +3788,13 @@ cmd_plan_apply() {
   post_apply_pipeline
 }
 
+# Runs terraform init + terraform destroy.
 cmd_destroy() {
   terraform_init
   terraform_destroy
 }
 
+# Downloads and installs CLI tools: helm, terraform, kubectl, talosctl, cilium, hubble, yq, jq.
 cmd_install_tools() {
   step "Install required CLI tools"
   
@@ -3775,6 +3891,7 @@ cmd_install_tools() {
   echo "  jq:        $(jq --version 2>/dev/null || echo 'not installed')"
 }
 
+# Prints help text with all available commands, configuration options, profiles, and examples.
 usage() {
   cat <<USAGE
 Usage: $0 <command>
@@ -3835,6 +3952,7 @@ Example:
 USAGE
 }
 
+# Entry point: loads config, initializes dashboard, dispatches to command handler based on $1.
 main() {
   load_config
   
